@@ -165,7 +165,7 @@ Detection is only as good as the events it is fed, and each source can be lied t
 
 | Source | Who can forge an sshd event | What minisiem does |
 |--------|-----------------------------|--------------------|
-| journald | Only root: journald records the real executable (`_EXE`), and only root can write under `/usr/` | Requires `_COMM` to be an sshd process **and** `_EXE` to be an sshd binary under `/usr/`. Never trusts `SYSLOG_IDENTIFIER` (`logger -t sshd` sets it) or `_COMM` alone (a binary copied to `~/sshd` gets `_COMM=sshd`) |
+| journald | Harder, not impossible: a local user can still run an installed sshd binary with a preloaded library (`LD_PRELOAD`) that logs a fake message, and journald then records a genuine `_EXE` and `_COMM` | Requires `_COMM` to be an sshd process **and** `_EXE` to be an sshd binary under `/usr/`, which stops `logger -t sshd` (`SYSLOG_IDENTIFIER`) and binaries copied to `~/sshd` (`_COMM` alone). Not yet checked: `_UID`, which would also stop the preload case if every sshd message comes from a root process |
 | syslog files | Any local user, with `logger -t sshd "Failed password ..."` | Nothing can tell them apart in plain text; prefer journald |
 | syslog over UDP | Anyone who can reach the port, with any host name and timestamp | Binds loopback only unless `--allow-remote-syslog`; timestamps events on arrival so a forged date cannot reset detection windows |
 
