@@ -1,10 +1,12 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::mpsc;
 
 use chrono::{Datelike, Duration, Local, Offset};
-use clap::{Args, Parser};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
@@ -12,6 +14,7 @@ use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::AutoParser;
 use minisiem::pipeline::Pipeline;
 use minisiem::rule_loading;
+use minisiem::sources::{Message, Stop, SyslogUdp, drain};
 
 /// Detect attacks in sshd logs.
 ///
@@ -20,10 +23,41 @@ use minisiem::rule_loading;
 /// `journalctl -o json` and network syslog (RFC 3164 / RFC 5424). Prints one
 /// line per alert.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Log file to analyze. Reads standard input when omitted or "-".
     file: Option<PathBuf>,
+
+    #[command(flatten)]
+    detection: DetectionArgs,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Watch live sources and print alerts as events arrive, until Ctrl+C.
+    Watch(WatchArgs),
+}
+
+#[derive(Args)]
+#[command(group(ArgGroup::new("sources").required(true).multiple(true).args(["journal", "syslog_udp"])))]
+struct WatchArgs {
+    /// Follow sshd entries in the systemd journal (runs `journalctl`; needs
+    /// permission to read the system journal).
+    #[arg(long)]
+    journal: bool,
+
+    /// Receive syslog messages (RFC 3164 or RFC 5424) on this UDP address,
+    /// e.g. 127.0.0.1:5514. Events are timestamped on arrival.
+    #[arg(long, value_name = "ADDR")]
+    syslog_udp: Option<SocketAddr>,
+
+    /// Allow --syslog-udp on a non-loopback address. UDP syslog is
+    /// unauthenticated: anyone who can reach the port can inject events.
+    #[arg(long, requires = "syslog_udp")]
+    allow_remote_syslog: bool,
 
     #[command(flatten)]
     detection: DetectionArgs,
@@ -98,10 +132,43 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs) -> Result<(), Stri
     Ok(())
 }
 
+/// Watch mode: run until interrupted or until a source fails.
+fn watch(args: &WatchArgs) -> Result<(), String> {
+    let detectors = args.detection.detectors()?;
+    let (events, messages) = mpsc::channel();
+
+    if let Some(addr) = args.syslog_udp {
+        let udp = SyslogUdp::bind(addr, args.allow_remote_syslog)?;
+        eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
+        udp.spawn(parser(), events.clone());
+    }
+
+    let shutdown = events.clone();
+    ctrlc::set_handler(move || {
+        let _ = shutdown.send(Message::Shutdown);
+    })
+    .map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
+    drop(events);
+
+    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
+    let stop = drain(&messages, &mut pipeline).map_err(|e| e.to_string());
+
+    let stats = pipeline.stats();
+    eprintln!("minisiem: watch: events={} alerts={}", stats.events, stats.alerts);
+    match stop? {
+        Stop::Interrupted => Ok(()),
+        Stop::SourceFailed { source, error } => Err(format!("{source}: {error}")),
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    match analyze(cli.file.as_ref(), &cli.detection) {
+    let result = match &cli.command {
+        Some(Command::Watch(args)) => watch(args),
+        None => analyze(cli.file.as_ref(), &cli.detection),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("minisiem: {message}");

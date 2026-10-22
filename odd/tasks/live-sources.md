@@ -22,7 +22,7 @@ Branch: `feat/live-sources` · Delivery: single PR, work-unit commits (forecast 
 | T2 | S2, S3 | inline | done | RED: 6 unit + journald CLI (0 alerts); GREEN: 112 unit + 12 CLI |
 | T3 | S2, S5 | inline | done | RED: 5 failing; GREEN: 118 unit + 12 CLI |
 | T4 | S4 | inline | done | refactor only (shared `DetectionArgs`, `analyze`); the `watch` subcommand lands with T5 so no commit ships a stub. GREEN: 118 unit + 12 CLI unchanged |
-| T5 | S4, S5, S6 | inline | pending | |
+| T5 | S4, S5, S6 | inline | done | RED: 9 unit + 3 CLI; GREEN: 127 unit + 15 CLI; UDP watch test stable 10/10 |
 | T6 | S3, S4, S6, S8 | inline | pending | |
 
 - T1: `Pipeline` struct usable event by event; console sink flushes per alert.
