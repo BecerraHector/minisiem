@@ -10,7 +10,8 @@ use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::SshdParser;
-use minisiem::{pipeline, rule_loading};
+use minisiem::pipeline::Pipeline;
+use minisiem::rule_loading;
 
 /// Detect SSH brute force attacks in sshd logs.
 ///
@@ -81,10 +82,11 @@ fn main() -> ExitCode {
     // Syslog timestamps lack year and timezone: assume the current local ones.
     let now = Local::now();
     let parser = SshdParser::new(now.year(), now.offset().fix());
-    let mut sink = ConsoleSink::new(io::stdout().lock());
+    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
 
-    match pipeline::run(input, &parser, &mut detectors, &mut sink) {
-        Ok(stats) => {
+    match pipeline.run(input, &parser) {
+        Ok(()) => {
+            let stats = pipeline.stats();
             eprintln!(
                 "minisiem: {source}: lines={} events={} alerts={}",
                 stats.lines, stats.events, stats.alerts
