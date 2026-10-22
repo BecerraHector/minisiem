@@ -11,7 +11,11 @@ use super::correlation::{CorrelationKind, Threshold};
 pub struct Hit {
     /// Position of the matching rule in the correlation's `rules`.
     pub input: usize,
+    /// When the match happened; drives windowing and ordering.
     pub timestamp: DateTime<Utc>,
+    /// Start of the activity behind the match: earlier than `timestamp` for
+    /// a chained correlation, so alerts cover the whole incident.
+    pub first_seen: DateTime<Utc>,
     /// Value of the counted field, for `value_count`.
     pub value: Option<String>,
     /// Underlying events this hit stands for (more than one for a chained
@@ -132,14 +136,15 @@ impl CorrelationState {
 fn summarize<'a>(hits: impl IntoIterator<Item = &'a Hit>, values: Vec<String>) -> Option<Fired> {
     let mut hits = hits.into_iter();
     let first = hits.next()?;
-    let (mut event_count, mut last_seen) = (first.event_count, first.timestamp);
+    let (mut event_count, mut first_seen, mut last_seen) = (first.event_count, first.first_seen, first.timestamp);
     for hit in hits {
         event_count += hit.event_count;
+        first_seen = first_seen.min(hit.first_seen);
         last_seen = hit.timestamp;
     }
     Some(Fired {
         event_count,
-        first_seen: first.timestamp,
+        first_seen,
         last_seen,
         values,
     })
@@ -158,6 +163,7 @@ mod tests {
         Hit {
             input,
             timestamp: at(secs),
+            first_seen: at(secs),
             value: None,
             event_count: 1,
         }

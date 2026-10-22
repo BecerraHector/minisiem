@@ -69,6 +69,7 @@ impl Detector for SigmaEngine {
                         let hit = Hit {
                             input,
                             timestamp: event.timestamp,
+                            first_seen: event.timestamp,
                             value: counted.and_then(|f| event.field(f)),
                             event_count: 1,
                         };
@@ -90,6 +91,7 @@ impl Detector for SigmaEngine {
                         let hit = Hit {
                             input,
                             timestamp: inner.last_seen,
+                            first_seen: inner.first_seen,
                             value: counted.and_then(lookup),
                             event_count: inner.event_count,
                         };
@@ -310,7 +312,7 @@ mod tests {
         assert!(matches!(
             &alerts[0].evidence,
             Evidence::Correlation { event_count: 4, first_seen, last_seen, group, .. }
-                if *first_seen == at(3) && *last_seen == at(60)
+                if *first_seen == at(1) && *last_seen == at(60)
                     && *group == [("src_ip".to_string(), "203.0.113.7".to_string())]
         ));
     }
