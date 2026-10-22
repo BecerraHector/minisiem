@@ -4,6 +4,7 @@
 mod auto;
 mod journal;
 mod sshd;
+mod syslog_net;
 
 pub use auto::AutoParser;
 pub use journal::JournalParser;
