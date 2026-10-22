@@ -56,3 +56,8 @@ pub struct Event {
     pub message: String,
     pub logsource: LogSource,
 }
+
+impl Event {
+    /// Field names detection rules can match on.
+    pub const FIELDS: [&'static str; 5] = ["host", "process", "user", "src_ip", "event_kind"];
+}

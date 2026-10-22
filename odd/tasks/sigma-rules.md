@@ -21,7 +21,7 @@ Branch: `feat/minisiem-sigma-rules` · Delivery: single PR, work-unit commits (f
 |----|-------|-------|--------|----------|
 | T1 | S7, S8 | inline | done | RED: compile errors; GREEN: 20 unit + 5 CLI |
 | T2 | S6 | inline | done | RED: 14 failing; GREEN: 34 unit |
-| T3 | S3, S4, S5 | inline | pending | |
+| T3 | S3, S4, S5 | inline | done | RED: 16 failing; GREEN: 50 unit |
 | T4 | S4, S5, S7, S8 | inline | pending | |
 | T5 | S2, S8, S9 | inline | pending | |
 
@@ -40,3 +40,4 @@ Routes: all inline (no writer trigger: tasks are sequential and the user is lear
 - **L3** T1: `Alert` now carries `Evidence::{Burst, Event}`. Security fix found on the way: attacker-controlled usernames could inject terminal escape sequences into console output; control characters are now escaped (normal output unchanged).
 - **L4** Native review blocked: `gentle-ai review assess` is unassessable because the untracked nested repo `rust-ejercicios/` sits inside this repository. Fix is the user's call (ignore it or move it). Pending reviews from base `ff4b0fd`.
 - **L5** T2: recursive-descent condition parser plus a linear-backtrack glob matcher (`*`, `?`, escapes) shared with value matching.
+- **L6** T3: `SigmaRule::from_yaml` validates everything at load time (fields against `Event::FIELDS`, modifiers, regex with a 1 MiB size limit, CIDR, condition references). Directory walking moves to T5 with the CLI.
