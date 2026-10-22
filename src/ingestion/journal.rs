@@ -1,5 +1,7 @@
 //! journald entries as printed by `journalctl -o json` (one JSON object per line).
 
+use std::path::{Component, Path};
+
 use chrono::DateTime;
 use serde_json::{Map, Value};
 
@@ -11,9 +13,10 @@ use crate::event::Event;
 ///
 /// Only fields starting with `_` are set by journald itself; the others
 /// (`SYSLOG_IDENTIFIER`, `MESSAGE`, ...) are chosen by whoever logged the
-/// entry. The process is therefore identified by the trusted `_COMM`: any
-/// local user can run `logger -t sshd "Failed password ..."`, but cannot fake
-/// the name of the process that wrote it.
+/// entry, e.g. `logger -t sshd "Failed password ..."`. Even the trusted
+/// `_COMM` is just the executable's name, which a user controls by copying
+/// any binary to `~/sshd`. So the entry must also come from an sshd binary
+/// under `/usr/` (`_EXE`), where unprivileged users cannot write.
 pub struct JournalParser;
 
 impl LogParser for JournalParser {
@@ -21,7 +24,8 @@ impl LogParser for JournalParser {
         let entry: Map<String, Value> = serde_json::from_str(line).ok()?;
 
         let process = entry.get("_COMM")?.as_str()?;
-        if !SSHD_PROCESSES.contains(&process) {
+        let executable = entry.get("_EXE")?.as_str()?;
+        if !SSHD_PROCESSES.contains(&process) || !is_installed_sshd(executable) {
             return None;
         }
         // Microseconds since the epoch, set by journald on reception.
@@ -32,6 +36,21 @@ impl LogParser for JournalParser {
 
         sshd_event(timestamp, host, process, &message)
     }
+}
+
+/// True for an sshd binary under `/usr/`, e.g. `/usr/sbin/sshd` or
+/// `/usr/lib/openssh/sshd-session`. `..` is refused so a path cannot climb
+/// out of `/usr/`.
+fn is_installed_sshd(executable: &str) -> bool {
+    let path = Path::new(executable);
+    path.starts_with("/usr")
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| SSHD_PROCESSES.contains(&name))
 }
 
 /// `MESSAGE` is a string, or an array of byte values when it is not valid
@@ -57,12 +76,18 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use serde_json::json;
 
-    /// A journal entry as `journalctl -o json` prints it (all values strings).
+    /// A journal entry from the real `/usr/lib/ssh/<comm>` binary.
     fn entry(comm: &str, message: serde_json::Value) -> String {
+        entry_with_exe(comm, &format!("/usr/lib/ssh/{comm}"), message)
+    }
+
+    /// A journal entry as `journalctl -o json` prints it (all values strings).
+    fn entry_with_exe(comm: &str, exe: &str, message: serde_json::Value) -> String {
         json!({
             "__REALTIME_TIMESTAMP": "1792667732123456",
             "_HOSTNAME": "srv01",
             "_COMM": comm,
+            "_EXE": exe,
             "_PID": "4321",
             "_UID": "0",
             "SYSLOG_IDENTIFIER": "sshd-session",
@@ -116,6 +141,46 @@ mod tests {
         // `logger -t sshd ...`: the identifier says sshd, the process does not.
         assert_eq!(JournalParser.parse(&entry("logger", message.clone())), None);
         assert!(JournalParser.parse(&entry("sshd-auth", message)).is_some());
+    }
+
+    #[test]
+    fn rejects_sshd_named_binaries_outside_root_owned_paths() {
+        let message = json!("Failed password for root from 203.0.113.7 port 1 ssh2");
+        // `cp /usr/bin/logger ~/sshd && ~/sshd "Failed password ..."` makes
+        // journald record _COMM=sshd; only _EXE tells where it came from.
+        let spoofed = [
+            entry_with_exe("sshd", "/home/mallory/sshd", message.clone()),
+            entry_with_exe("sshd", "/tmp/sshd", message.clone()),
+            entry_with_exe("sshd", "/usr/../home/mallory/sshd", message.clone()),
+            entry_with_exe("sshd", "/usr/bin/logger", message.clone()),
+            json!({"__REALTIME_TIMESTAMP": "1792667732123456", "_COMM": "sshd", "MESSAGE": message.clone()})
+                .to_string(),
+        ];
+
+        for line in spoofed {
+            assert_eq!(JournalParser.parse(&line), None, "should be rejected: {line}");
+        }
+    }
+
+    #[test]
+    fn accepts_sshd_binaries_where_distributions_install_them() {
+        let message = json!("Failed password for root from 203.0.113.7 port 1 ssh2");
+        let installs = [
+            ("sshd", "/usr/sbin/sshd"),
+            ("sshd", "/usr/bin/sshd"),
+            ("sshd-session", "/usr/lib/openssh/sshd-session"),
+            ("sshd-session", "/usr/libexec/openssh/sshd-session"),
+            ("sshd-auth", "/usr/lib/ssh/sshd-auth"),
+        ];
+
+        for (comm, exe) in installs {
+            assert!(
+                JournalParser
+                    .parse(&entry_with_exe(comm, exe, message.clone()))
+                    .is_some(),
+                "should accept {exe}"
+            );
+        }
     }
 
     #[test]

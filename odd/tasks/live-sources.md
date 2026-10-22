@@ -13,6 +13,8 @@ Branch: `feat/live-sources` · Delivery: single PR, work-unit commits (forecast 
 - **S6** Fail closed: if a source stops (bind error, `journalctl` missing or exiting), `watch` reports it and exits with code 1. Ctrl+C stops cleanly with exit code 0 and prints the summary.
 - **S7** Alerts are flushed as they are emitted, so they appear immediately when stdout is a pipe.
 - **S8** Document `watch`, the formats, the trust model of each source and the `tail -F` recipe for following files in the README.
+- **S9** (review follow-up R1-comm-spoofable) `_COMM` alone is spoofable: a local user can copy any binary to `~/sshd` and run it. journald entries count only when the trusted `_EXE` is an sshd binary (file name in the sshd process list) under `/usr/`, which unprivileged users cannot write. The README trust model is corrected.
+- **S10** (review follow-ups R1-unbounded-channel, R4-unbounded-event-channel, R4-shutdown-queued-behind-backlog) The event queue between sources and the pipeline is bounded (10,000 events). When it is full, new events are dropped and counted; the first drop prints a warning and the summary reports `dropped=N` when N > 0. Ctrl+C and source failures are handled ahead of queued events.
 
 ## Tasks
 
@@ -23,6 +25,8 @@ Branch: `feat/live-sources` · Delivery: single PR, work-unit commits (forecast 
 | T3 | S2, S5 | inline | done | RED: 5 failing; GREEN: 118 unit + 12 CLI |
 | T4 | S4 | inline | done | refactor only (shared `DetectionArgs`, `analyze`); the `watch` subcommand lands with T5 so no commit ships a stub. GREEN: 118 unit + 12 CLI unchanged |
 | T5 | S4, S5, S6 | inline | done | RED: 9 unit + 3 CLI; GREEN: 127 unit + 15 CLI; UDP watch test stable 10/10 |
+| T8 | S9 | inline | done | RED: `/home/mallory/sshd` entry produced an event; GREEN: 132 unit + 18 CLI (fixture: 12 copied-binary spoofs ignored) |
+| T9 | S10 | inline | pending | |
 | T6 | S3, S4, S6, S8 | inline | done | RED: 3 unit; GREEN: 130 unit + 18 CLI; watch tests 10/10, no orphan journalctl |
 
 - T1: `Pipeline` struct usable event by event; console sink flushes per alert.
@@ -38,6 +42,7 @@ Routes: all inline (sequential tasks, no writer trigger).
 
 - **L1** (2026-10-22) User: "arranquemos con la 4a"
 - **L2** Environment: OpenSSH 10.6 (per-connection logs come from `sshd-session`; `sshd-auth` exists since 10.0 and is accepted defensively), systemd 262. A real journal entry showed `SYSLOG_IDENTIFIER` differing from `_COMM`: only underscore fields are set by journald. Crates: `serde_json` 1.0, `ctrlc` 3.5.
+- **L7** (2026-10-22) User: "dale corrigamos estas 2 ahora" (fix R1-comm-spoofable and the unbounded channel before the PR; the other advisories become issues).
 - **L6** Verification: native assess `high` (executable fixtures + escalated item 4). Independent verifier: S1-S8 PASS, no blockers, 6 advisories; parent spot check: batch output with `--rules` hashes identically at `6d86864` and HEAD. User granted native review (lenses risk, resilience, reliability): approved and acknowledged (lineage `review-25f0dd1fb9620326`), 8 non-blocking advisories: R1-comm-spoofable, R1-journalctl-env-override, R1-unbounded-channel, R3-ctrlc-journal-race, R3-read-error-hang, R3-stale-parser-year, R4-shutdown-queued-behind-backlog, R4-unbounded-event-channel. Pending user decision on follow-ups. Not pushed.
 - **L5** T6: `MINISIEM_JOURNALCTL` overrides the `journalctl` binary so CLI tests run fake scripts (follow, exit, no permission). The reader thread joins the stderr relay before reporting a stopped source, so journalctl's last error is always printed. Orphan check: `pgrep -f "sleep 600"` matched the checking shell itself; `pgrep -x sleep` showed no leftover processes.
 - **L4** T2: the syslog header regex now also accepts `sshd-auth`, matching the journald process list. The journald fixture includes 12 failures spoofed with `logger -t sshd` from another IP; they produce no events.

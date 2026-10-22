@@ -184,7 +184,7 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn reads_journald_json_and_ignores_entries_spoofed_with_logger() {
+fn reads_journald_json_and_ignores_spoofed_sshd_entries() {
     let journal = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json");
 
     let output = minisiem(&[journal]);
@@ -199,9 +199,10 @@ fn reads_journald_json_and_ignores_entries_spoofed_with_logger() {
         "alert: {}",
         alerts[0]
     );
-    // 12 "failures" written with `logger -t sshd` from 198.51.100.99 are not sshd's.
+    // 12 "failures" from 198.51.100.99 written with `logger -t sshd`, and 12
+    // from 198.51.100.77 written by a binary copied to ~/sshd, are not sshd's.
     assert!(
-        stderr(&output).contains("lines=24 events=11 alerts=1"),
+        stderr(&output).contains("lines=36 events=11 alerts=1"),
         "stderr: {}",
         stderr(&output)
     );

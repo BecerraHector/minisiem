@@ -46,7 +46,7 @@ mod tests {
     fn parses_syslog_and_journal_lines() {
         let syslog = "Oct 22 10:15:32 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
         let journal = r#"{"__REALTIME_TIMESTAMP":"1792667732000000","_HOSTNAME":"srv02","_COMM":"sshd",
-                          "MESSAGE":"Accepted publickey for hector from 192.168.1.10 port 2 ssh2"}"#;
+                          "_EXE":"/usr/sbin/sshd","MESSAGE":"Accepted publickey for hector from 192.168.1.10 port 2 ssh2"}"#;
 
         let from_syslog = parser().parse(syslog).unwrap();
         let from_journal = parser().parse(&journal.replace('\n', "")).unwrap();
