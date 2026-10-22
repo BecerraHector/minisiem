@@ -16,7 +16,11 @@ use crate::event::Event;
 /// entry, e.g. `logger -t sshd "Failed password ..."`. Even the trusted
 /// `_COMM` is just the executable's name, which a user controls by copying
 /// any binary to `~/sshd`. So the entry must also come from an sshd binary
-/// under `/usr/` (`_EXE`), where unprivileged users cannot write.
+/// under `/usr/` (`_EXE`), where unprivileged users cannot write, running as
+/// root (`_UID`): a user can still start an installed sshd binary with
+/// `LD_PRELOAD`, but only as themselves. sshd logs the messages we detect
+/// from its privileged monitor, which runs as root; the unprivileged child
+/// forwards its logs to the monitor.
 pub struct JournalParser;
 
 impl LogParser for JournalParser {
@@ -25,7 +29,8 @@ impl LogParser for JournalParser {
 
         let process = entry.get("_COMM")?.as_str()?;
         let executable = entry.get("_EXE")?.as_str()?;
-        if !SSHD_PROCESSES.contains(&process) || !is_installed_sshd(executable) {
+        let uid = entry.get("_UID")?.as_str()?;
+        if !SSHD_PROCESSES.contains(&process) || !is_installed_sshd(executable) || uid != "0" {
             return None;
         }
         // Microseconds since the epoch, set by journald on reception.
@@ -81,15 +86,20 @@ mod tests {
         entry_with_exe(comm, &format!("/usr/lib/ssh/{comm}"), message)
     }
 
-    /// A journal entry as `journalctl -o json` prints it (all values strings).
+    /// A journal entry logged by root.
     fn entry_with_exe(comm: &str, exe: &str, message: serde_json::Value) -> String {
+        entry_with_uid(comm, exe, "0", message)
+    }
+
+    /// A journal entry as `journalctl -o json` prints it (all values strings).
+    fn entry_with_uid(comm: &str, exe: &str, uid: &str, message: serde_json::Value) -> String {
         json!({
             "__REALTIME_TIMESTAMP": "1792667732123456",
             "_HOSTNAME": "srv01",
             "_COMM": comm,
             "_EXE": exe,
             "_PID": "4321",
-            "_UID": "0",
+            "_UID": uid,
             "SYSLOG_IDENTIFIER": "sshd-session",
             "MESSAGE": message,
         })
@@ -163,6 +173,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_installed_sshd_binaries_not_running_as_root() {
+        let message = json!("Failed password for root from 203.0.113.7 port 1 ssh2");
+        // `LD_PRELOAD=~/fake.so /usr/lib/ssh/sshd-auth` logs with a genuine
+        // _EXE and _COMM, but as the user who ran it.
+        let spoofed = [
+            entry_with_uid("sshd-auth", "/usr/lib/ssh/sshd-auth", "1000", message.clone()),
+            entry_with_uid("sshd-session", "/usr/lib/ssh/sshd-session", "1000", message.clone()),
+            entry_with_uid("sshd", "/usr/sbin/sshd", "00", message.clone()),
+            json!({"__REALTIME_TIMESTAMP": "1792667732123456", "_COMM": "sshd",
+                   "_EXE": "/usr/sbin/sshd", "MESSAGE": message.clone()})
+            .to_string(),
+        ];
+
+        for line in spoofed {
+            assert_eq!(JournalParser.parse(&line), None, "should be rejected: {line}");
+        }
+    }
+
+    #[test]
     fn accepts_sshd_binaries_where_distributions_install_them() {
         let message = json!("Failed password for root from 203.0.113.7 port 1 ssh2");
         let installs = [
@@ -171,6 +200,8 @@ mod tests {
             ("sshd-session", "/usr/lib/openssh/sshd-session"),
             ("sshd-session", "/usr/libexec/openssh/sshd-session"),
             ("sshd-auth", "/usr/lib/ssh/sshd-auth"),
+            // Built from source (default prefix); still has to run as root.
+            ("sshd-session", "/usr/local/libexec/sshd-session"),
         ];
 
         for (comm, exe) in installs {
