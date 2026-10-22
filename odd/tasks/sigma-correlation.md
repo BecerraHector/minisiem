@@ -42,5 +42,6 @@ Routes: all inline (sequential tasks, no writer trigger).
 
 - **L1** (2026-10-22) User: "sigamos con la fase 3"
 - **L2** Spec read from SigmaHQ `sigma-correlation-rules-specification.md` (v2.1.0): types, `rules` by name or id, chaining, `generate` default false, multi-document YAML, timespan units `s|m|h|d`, condition operators `gt|gte|lt|lte|eq|neq`.
+- **L5** Native assessment of `main..HEAD`: risk `medium` (shipped rule files), `review_due: false` (`under_budget`); verification by the tier = own checks (104 unit + 11 CLI, clippy, fmt). Not pushed: push and PR are the user's call.
 - **L4** Defect found while writing T6 rules: chained hits carried only the inner correlation's `last_seen`, so the outer alert started at the end of the burst. Fixed by giving `Hit` its own `first_seen` (T7). Fixture with shipped rules: 8 alerts, including `[CRITICAL] SSH login after brute force ... events=11` starting at the first failure.
 - **L3** Repo is now `BecerraHector/minisiem` (phase 2 merged as PR #1, `0632afc`). Merged local branch `feat/minisiem-sigma-rules` deleted.
