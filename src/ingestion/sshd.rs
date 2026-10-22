@@ -15,9 +15,8 @@ static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-static FAILED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Failed \S+ for (?:invalid user )?(?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap()
-});
+static FAILED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Failed \S+ for (?:invalid user )?(?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
 
 static INVALID_USER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^Invalid user (?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
@@ -179,11 +178,15 @@ mod tests {
 
     #[test]
     fn parses_iso_timestamp_with_fraction_and_compact_offset() {
-        let line = "2026-10-22T10:15:32.123456+0000 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
+        let line =
+            "2026-10-22T10:15:32.123456+0000 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
 
         let event = parser().parse(line).unwrap();
 
-        assert_eq!(event.timestamp.timestamp(), Utc.with_ymd_and_hms(2026, 10, 22, 10, 15, 32).unwrap().timestamp());
+        assert_eq!(
+            event.timestamp.timestamp(),
+            Utc.with_ymd_and_hms(2026, 10, 22, 10, 15, 32).unwrap().timestamp()
+        );
     }
 
     #[test]

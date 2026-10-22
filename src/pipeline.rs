@@ -79,7 +79,14 @@ mod tests {
 
         let stats = run(input.as_slice(), &parser, &mut detectors, &mut sink).unwrap();
 
-        assert_eq!(stats, Stats { lines: 4, events: 3, alerts: 1 });
+        assert_eq!(
+            stats,
+            Stats {
+                lines: 4,
+                events: 3,
+                alerts: 1
+            }
+        );
         assert_eq!(sink.0.len(), 1);
         assert!(matches!(sink.0[0].evidence, Evidence::Burst { event_count: 2, .. }));
     }

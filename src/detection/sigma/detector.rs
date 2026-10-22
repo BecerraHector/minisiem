@@ -72,7 +72,10 @@ mod tests {
                 rule_id: "rule-1".into(),
                 title: "SSH login as root".into(),
                 severity: Severity::High,
-                techniques: vec![MitreTechnique { id: "T1078.003".into(), name: None }],
+                techniques: vec![MitreTechnique {
+                    id: "T1078.003".into(),
+                    name: None
+                }],
                 src_ip: event.src_ip,
                 host: "srv01".into(),
                 evidence: Evidence::Event(event),

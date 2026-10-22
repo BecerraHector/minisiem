@@ -27,7 +27,12 @@ impl<W: Write> AlertSink for ConsoleSink<W> {
         )?;
 
         match &alert.evidence {
-            Evidence::Burst { event_count, first_seen, last_seen, users } => writeln!(
+            Evidence::Burst {
+                event_count,
+                first_seen,
+                last_seen,
+                users,
+            } => writeln!(
                 self.out,
                 " failures={event_count} users={} first_seen={} last_seen={}",
                 escape_control(&users.join(",")),
@@ -68,7 +73,13 @@ fn techniques(alert: &Alert) -> String {
 fn escape_control(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { c.escape_unicode().to_string() } else { c.to_string() })
+        .map(|c| {
+            if c.is_control() {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
         .collect()
 }
 
@@ -90,7 +101,10 @@ mod tests {
             rule_id: "ssh-brute-force".into(),
             title: "SSH brute force".into(),
             severity: Severity::High,
-            techniques: vec![MitreTechnique { id: "T1110.001".into(), name: Some("Password Guessing".into()) }],
+            techniques: vec![MitreTechnique {
+                id: "T1110.001".into(),
+                name: Some("Password Guessing".into()),
+            }],
             src_ip: "203.0.113.7".parse().unwrap(),
             host: "srv01".into(),
             evidence: Evidence::Burst {
@@ -136,7 +150,10 @@ mod tests {
     #[test]
     fn writes_single_event_alert_with_unnamed_technique() {
         let alert = event_alert(
-            vec![MitreTechnique { id: "T1078.003".into(), name: None }],
+            vec![MitreTechnique {
+                id: "T1078.003".into(),
+                name: None,
+            }],
             "root",
             "Accepted password for root from 203.0.113.7 port 52100 ssh2",
         );
@@ -153,8 +170,14 @@ mod tests {
     fn lists_several_techniques_and_omits_parentheses_when_there_are_none() {
         let several = event_alert(
             vec![
-                MitreTechnique { id: "T1078".into(), name: None },
-                MitreTechnique { id: "T1021.004".into(), name: Some("SSH".into()) },
+                MitreTechnique {
+                    id: "T1078".into(),
+                    name: None,
+                },
+                MitreTechnique {
+                    id: "T1021.004".into(),
+                    name: Some("SSH".into()),
+                },
             ],
             "root",
             "x",

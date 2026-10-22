@@ -55,7 +55,11 @@ fn main() -> ExitCode {
         match rule_loading::load_dir(dir) {
             Ok(rules) => {
                 eprintln!("minisiem: loaded {} sigma rules from {}", rules.len(), dir.display());
-                detectors.extend(rules.into_iter().map(|rule| Box::new(SigmaDetector::new(rule)) as Box<dyn Detector>));
+                detectors.extend(
+                    rules
+                        .into_iter()
+                        .map(|rule| Box::new(SigmaDetector::new(rule)) as Box<dyn Detector>),
+                );
             }
             Err(err) => {
                 eprintln!("minisiem: {err}");

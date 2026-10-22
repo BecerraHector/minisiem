@@ -6,7 +6,10 @@ const BRUTE_FORCE_ALERT: &str = "[HIGH] SSH brute force (T1110.001 Password Gues
                                  failures=10 users=admin,oracle,root,test,ubuntu";
 
 fn minisiem(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_minisiem")).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(args)
+        .output()
+        .unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -25,7 +28,11 @@ fn detects_brute_force_in_a_log_file() {
     let alerts: Vec<_> = stdout(&output).lines().map(str::to_owned).collect();
     assert_eq!(alerts.len(), 1, "alerts: {alerts:?}");
     assert!(alerts[0].starts_with(BRUTE_FORCE_ALERT), "alert: {}", alerts[0]);
-    assert!(stderr(&output).contains("lines=23 events=20 alerts=1"), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("lines=23 events=20 alerts=1"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -67,7 +74,11 @@ fn fails_with_clear_message_when_file_is_missing() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout(&output).is_empty());
-    assert!(stderr(&output).starts_with("minisiem: /nonexistent/auth.log:"), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with("minisiem: /nonexistent/auth.log:"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -103,7 +114,11 @@ fn loads_rules_recursively_and_ignores_other_files() {
     let output = minisiem(&["--rules", rules, FIXTURE]);
 
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert!(stderr(&output).contains("loaded 1 sigma rules"), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("loaded 1 sigma rules"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -125,7 +140,11 @@ fn fails_with_clear_message_when_rules_dir_is_missing() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout(&output).is_empty());
-    assert!(stderr(&output).starts_with("minisiem: /nonexistent/rules:"), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with("minisiem: /nonexistent/rules:"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

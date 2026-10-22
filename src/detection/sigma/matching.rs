@@ -207,6 +207,10 @@ mod tests {
     fn rules_without_logsource_apply_everywhere() {
         let yaml = "title: t\ndetection:\n  s:\n    user: root\n  condition: s\n";
 
-        assert!(SigmaRule::from_yaml(yaml).unwrap().matches(&login("root", "203.0.113.7")));
+        assert!(
+            SigmaRule::from_yaml(yaml)
+                .unwrap()
+                .matches(&login("root", "203.0.113.7"))
+        );
     }
 }

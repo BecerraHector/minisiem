@@ -107,9 +107,15 @@ impl SigmaRule {
     pub fn from_yaml(yaml: &str) -> Result<Self, RuleError> {
         let raw: RawRule = serde_saphyr::from_str(yaml).map_err(|e| RuleError(format!("invalid YAML: {e}")))?;
 
-        let Some(title) = raw.title else { return error("missing 'title'") };
-        let Some(detection) = raw.detection else { return error("missing 'detection'") };
-        let Value::Map(entries) = detection else { return error("'detection' must be a map") };
+        let Some(title) = raw.title else {
+            return error("missing 'title'");
+        };
+        let Some(detection) = raw.detection else {
+            return error("missing 'detection'");
+        };
+        let Value::Map(entries) = detection else {
+            return error("'detection' must be a map");
+        };
 
         let mut condition = None;
         let mut searches: Vec<(String, Search)> = Vec::new();
@@ -124,7 +130,9 @@ impl SigmaRule {
             }
         }
 
-        let Some(condition) = condition else { return error("missing 'condition' in 'detection'") };
+        let Some(condition) = condition else {
+            return error("missing 'condition' in 'detection'");
+        };
         if searches.is_empty() {
             return error("'detection' has no search identifiers");
         }
@@ -138,7 +146,10 @@ impl SigmaRule {
                 .tags
                 .iter()
                 .filter_map(|tag| TECHNIQUE_TAG.captures(tag))
-                .map(|caps| MitreTechnique { id: caps[1].to_uppercase(), name: None })
+                .map(|caps| MitreTechnique {
+                    id: caps[1].to_uppercase(),
+                    name: None,
+                })
                 .collect(),
             logsource: LogSource {
                 product: raw.logsource.product,
@@ -201,7 +212,11 @@ fn validate_references(condition: &Condition, searches: &[(String, Search)]) -> 
 }
 
 fn parse_search(name: &str, value: Value) -> Result<Search, RuleError> {
-    let invalid = || error(format!("search '{name}' must be a map, a list of maps or a list of keywords"));
+    let invalid = || {
+        error(format!(
+            "search '{name}' must be a map, a list of maps or a list of keywords"
+        ))
+    };
 
     match value {
         Value::Map(entries) => Ok(Search::Maps(vec![parse_map(name, entries)?])),
@@ -231,7 +246,10 @@ fn parse_map(name: &str, entries: Vec<(String, Value)>) -> Result<Vec<FieldMatch
     if entries.is_empty() {
         return error(format!("search '{name}' has an empty map"));
     }
-    entries.into_iter().map(|(key, value)| parse_field(&key, value)).collect()
+    entries
+        .into_iter()
+        .map(|(key, value)| parse_field(&key, value))
+        .collect()
 }
 
 /// Parses `field|modifier|...: value(s)`.
@@ -239,7 +257,10 @@ fn parse_field(key: &str, value: Value) -> Result<FieldMatcher, RuleError> {
     let mut parts = key.split('|');
     let field = parts.next().unwrap_or_default();
     if !Event::FIELDS.contains(&field) {
-        return error(format!("unknown field '{field}' (available: {})", Event::FIELDS.join(", ")));
+        return error(format!(
+            "unknown field '{field}' (available: {})",
+            Event::FIELDS.join(", ")
+        ));
     }
 
     let mut all = false;
@@ -253,7 +274,9 @@ fn parse_field(key: &str, value: Value) -> Result<FieldMatcher, RuleError> {
         }
     }
     if let [first, second, ..] = transforms.as_slice() {
-        return error(format!("field '{field}': modifiers '{first}' and '{second}' cannot be combined"));
+        return error(format!(
+            "field '{field}': modifiers '{first}' and '{second}' cannot be combined"
+        ));
     }
     let transform = transforms.first().copied();
 
@@ -269,15 +292,19 @@ fn parse_field(key: &str, value: Value) -> Result<FieldMatcher, RuleError> {
         .into_iter()
         .map(|item| match (item, transform) {
             (Value::Null, None) => Ok(ValueMatcher::Null),
-            (Value::Null, Some(modifier)) => {
-                error(format!("field '{field}': null cannot be combined with modifier '{modifier}'"))
-            }
+            (Value::Null, Some(modifier)) => error(format!(
+                "field '{field}': null cannot be combined with modifier '{modifier}'"
+            )),
             (Value::Scalar(text), transform) => build_matcher(field, &text, transform),
             _ => error(format!("field '{field}' values must be scalars or null")),
         })
         .collect::<Result<_, _>>()?;
 
-    Ok(FieldMatcher { field: field.to_string(), values, all })
+    Ok(FieldMatcher {
+        field: field.to_string(),
+        values,
+        all,
+    })
 }
 
 fn build_matcher(field: &str, text: &str, transform: Option<&str>) -> Result<ValueMatcher, RuleError> {
@@ -353,8 +380,14 @@ mod tests {
         assert_eq!(
             rule.techniques,
             vec![
-                MitreTechnique { id: "T1078.003".into(), name: None },
-                MitreTechnique { id: "T1021".into(), name: None },
+                MitreTechnique {
+                    id: "T1078.003".into(),
+                    name: None
+                },
+                MitreTechnique {
+                    id: "T1021".into(),
+                    name: None
+                },
             ]
         );
         assert_eq!(rule.logsource, LogSource::new("linux", "sshd"));
@@ -364,11 +397,13 @@ mod tests {
 
     #[test]
     fn maps_levels_and_defaults_to_medium() {
-        let with_level = |level: &str| {
-            format!("title: t\nlevel: {level}\ndetection:\n  s:\n    user: x\n  condition: s\n")
-        };
+        let with_level =
+            |level: &str| format!("title: t\nlevel: {level}\ndetection:\n  s:\n    user: x\n  condition: s\n");
 
-        assert_eq!(rule("title: t\ndetection:\n  s:\n    user: x\n  condition: s\n").severity, Severity::Medium);
+        assert_eq!(
+            rule("title: t\ndetection:\n  s:\n    user: x\n  condition: s\n").severity,
+            Severity::Medium
+        );
         assert_eq!(rule(&with_level("informational")).severity, Severity::Informational);
         assert_eq!(rule(&with_level("low")).severity, Severity::Low);
         assert_eq!(rule(&with_level("critical")).severity, Severity::Critical);
@@ -395,8 +430,16 @@ mod tests {
         assert_eq!(
             search,
             Search::Maps(vec![vec![
-                FieldMatcher { field: "user".into(), values: vec![wildcard("root")], all: false },
-                FieldMatcher { field: "event_kind".into(), values: vec![wildcard("successful_login")], all: false },
+                FieldMatcher {
+                    field: "user".into(),
+                    values: vec![wildcard("root")],
+                    all: false
+                },
+                FieldMatcher {
+                    field: "event_kind".into(),
+                    values: vec![wildcard("successful_login")],
+                    all: false
+                },
             ]])
         );
     }
@@ -408,8 +451,16 @@ mod tests {
         assert_eq!(
             search,
             Search::Maps(vec![
-                vec![FieldMatcher { field: "user".into(), values: vec![wildcard("root"), wildcard("admin")], all: false }],
-                vec![FieldMatcher { field: "host".into(), values: vec![wildcard("srv*")], all: false }],
+                vec![FieldMatcher {
+                    field: "user".into(),
+                    values: vec![wildcard("root"), wildcard("admin")],
+                    all: false
+                }],
+                vec![FieldMatcher {
+                    field: "host".into(),
+                    values: vec![wildcard("srv*")],
+                    all: false
+                }],
             ])
         );
     }
@@ -418,13 +469,22 @@ mod tests {
     fn parses_keywords_as_contains() {
         let search = search("keywords:\n  - 'Did not receive identification'\n  - 5\ncondition: keywords");
 
-        assert_eq!(search, Search::Keywords(vec![wildcard("*Did not receive identification*"), wildcard("*5*")]));
+        assert_eq!(
+            search,
+            Search::Keywords(vec![wildcard("*Did not receive identification*"), wildcard("*5*")])
+        );
     }
 
     #[test]
     fn parses_null_values() {
-        assert_eq!(single_field("s:\n  user: null\ncondition: s").values, vec![ValueMatcher::Null]);
-        assert_eq!(single_field("s:\n  user: ~\ncondition: s").values, vec![ValueMatcher::Null]);
+        assert_eq!(
+            single_field("s:\n  user: null\ncondition: s").values,
+            vec![ValueMatcher::Null]
+        );
+        assert_eq!(
+            single_field("s:\n  user: ~\ncondition: s").values,
+            vec![ValueMatcher::Null]
+        );
     }
 
     #[test]
@@ -448,9 +508,18 @@ mod tests {
 
     #[test]
     fn folds_string_modifiers_into_wildcards() {
-        assert_eq!(single_field("s:\n  user|contains: adm\ncondition: s").values, vec![wildcard("*adm*")]);
-        assert_eq!(single_field("s:\n  user|startswith: adm\ncondition: s").values, vec![wildcard("adm*")]);
-        assert_eq!(single_field("s:\n  user|endswith: adm\ncondition: s").values, vec![wildcard("*adm")]);
+        assert_eq!(
+            single_field("s:\n  user|contains: adm\ncondition: s").values,
+            vec![wildcard("*adm*")]
+        );
+        assert_eq!(
+            single_field("s:\n  user|startswith: adm\ncondition: s").values,
+            vec![wildcard("adm*")]
+        );
+        assert_eq!(
+            single_field("s:\n  user|endswith: adm\ncondition: s").values,
+            vec![wildcard("*adm")]
+        );
     }
 
     #[test]
@@ -475,7 +544,9 @@ mod tests {
 
     #[test]
     fn rejects_invalid_modifiers_and_values() {
-        assert!(error(&yaml_with_detection("s:\n  user|base64: x\ncondition: s")).contains("unknown modifier 'base64'"));
+        assert!(
+            error(&yaml_with_detection("s:\n  user|base64: x\ncondition: s")).contains("unknown modifier 'base64'")
+        );
         assert!(error(&yaml_with_detection("s:\n  user|re: '('\ncondition: s")).contains("invalid regex"));
         assert!(error(&yaml_with_detection("s:\n  src_ip|cidr: nope\ncondition: s")).contains("invalid CIDR"));
         assert!(error(&yaml_with_detection("s:\n  user|re|contains: x\ncondition: s")).contains("cannot be combined"));
@@ -497,7 +568,9 @@ mod tests {
 
     #[test]
     fn a_list_of_conditions_means_any_of_them() {
-        let rule = rule(&yaml_with_detection("a:\n  user: x\nb:\n  user: y\ncondition:\n  - a\n  - all of them"));
+        let rule = rule(&yaml_with_detection(
+            "a:\n  user: x\nb:\n  user: y\ncondition:\n  - a\n  - all of them",
+        ));
 
         assert_eq!(
             rule.condition,

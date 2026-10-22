@@ -162,8 +162,14 @@ mod tests {
     fn ignores_events_that_are_not_failed_logins() {
         let mut rule = rule();
         for secs in 0..5 {
-            assert_eq!(rule.evaluate(&event(EventKind::InvalidUser, "203.0.113.7", "x", secs)), None);
-            assert_eq!(rule.evaluate(&event(EventKind::SuccessfulLogin, "203.0.113.7", "x", secs)), None);
+            assert_eq!(
+                rule.evaluate(&event(EventKind::InvalidUser, "203.0.113.7", "x", secs)),
+                None
+            );
+            assert_eq!(
+                rule.evaluate(&event(EventKind::SuccessfulLogin, "203.0.113.7", "x", secs)),
+                None
+            );
         }
     }
 
@@ -177,7 +183,9 @@ mod tests {
 
         assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 3)), None);
         assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 4)), None);
-        let second = rule.evaluate(&failed("203.0.113.7", "root", 5)).expect("second burst fires");
+        let second = rule
+            .evaluate(&failed("203.0.113.7", "root", 5))
+            .expect("second burst fires");
         assert!(matches!(second.evidence, Evidence::Burst { first_seen, .. } if first_seen == at(3)));
     }
 }

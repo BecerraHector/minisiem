@@ -66,7 +66,10 @@ impl fmt::Display for ConditionError {
                 write!(f, "invalid character '{character}' at position {position}")
             }
             Self::AggregationNotSupported => {
-                write!(f, "aggregation expressions ('|') are not supported; use correlation rules")
+                write!(
+                    f,
+                    "aggregation expressions ('|') are not supported; use correlation rules"
+                )
             }
             Self::WildcardOutsideQuantifier(pattern) => {
                 write!(f, "wildcard '{pattern}' is only allowed after '1 of' or 'all of'")
@@ -255,7 +258,11 @@ impl Parser {
             }
             Token::Word(word) if word == "1" || word == "all" => {
                 let selector = self.quantified()?;
-                Ok(if word == "1" { Condition::OneOf(selector) } else { Condition::AllOf(selector) })
+                Ok(if word == "1" {
+                    Condition::OneOf(selector)
+                } else {
+                    Condition::AllOf(selector)
+                })
             }
             Token::Word(word) if KEYWORDS.contains(&word.as_str()) => Err(error),
             Token::Word(word) if word.chars().all(|c| c.is_ascii_digit()) => Err(error),
@@ -320,7 +327,10 @@ mod tests {
 
     #[test]
     fn not_binds_tighter_than_and_which_binds_tighter_than_or() {
-        assert_eq!(parse("a or b and not c"), or(search("a"), and(search("b"), not(search("c")))));
+        assert_eq!(
+            parse("a or b and not c"),
+            or(search("a"), and(search("b"), not(search("c"))))
+        );
         assert_eq!(parse("not a and b"), and(not(search("a")), search("b")));
     }
 
@@ -337,7 +347,10 @@ mod tests {
 
     #[test]
     fn parses_quantifiers() {
-        assert_eq!(parse("1 of selection*"), Condition::OneOf(Selector::Pattern("selection*".into())));
+        assert_eq!(
+            parse("1 of selection*"),
+            Condition::OneOf(Selector::Pattern("selection*".into()))
+        );
         assert_eq!(parse("all of them"), Condition::AllOf(Selector::Them));
         assert_eq!(
             parse("1 of them and not filter"),
@@ -353,11 +366,41 @@ mod tests {
             ("a and", ConditionError::UnexpectedEnd),
             ("(a", ConditionError::UnexpectedEnd),
             ("1 of", ConditionError::UnexpectedEnd),
-            ("a b", ConditionError::UnexpectedToken { token: "b".into(), position: 2 }),
-            ("a)", ConditionError::UnexpectedToken { token: ")".into(), position: 1 }),
-            ("and a", ConditionError::UnexpectedToken { token: "and".into(), position: 0 }),
-            ("2 of them", ConditionError::UnexpectedToken { token: "2".into(), position: 0 }),
-            ("a & b", ConditionError::InvalidCharacter { character: '&', position: 2 }),
+            (
+                "a b",
+                ConditionError::UnexpectedToken {
+                    token: "b".into(),
+                    position: 2,
+                },
+            ),
+            (
+                "a)",
+                ConditionError::UnexpectedToken {
+                    token: ")".into(),
+                    position: 1,
+                },
+            ),
+            (
+                "and a",
+                ConditionError::UnexpectedToken {
+                    token: "and".into(),
+                    position: 0,
+                },
+            ),
+            (
+                "2 of them",
+                ConditionError::UnexpectedToken {
+                    token: "2".into(),
+                    position: 0,
+                },
+            ),
+            (
+                "a & b",
+                ConditionError::InvalidCharacter {
+                    character: '&',
+                    position: 2,
+                },
+            ),
             ("sel | count() > 5", ConditionError::AggregationNotSupported),
             ("sel*", ConditionError::WildcardOutsideQuantifier("sel*".into())),
         ];
