@@ -1,10 +1,12 @@
-//! Use case: read raw lines, normalize them, run every detector and deliver
-//! the resulting alerts.
+//! Use case: run every detector on normalized events and deliver the
+//! resulting alerts, either from a line-oriented reader (batch) or one event
+//! at a time (live sources).
 
 use std::io::{self, BufRead};
 
 use crate::alerting::AlertSink;
 use crate::detection::Detector;
+use crate::event::Event;
 use crate::ingestion::LogParser;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -14,34 +16,57 @@ pub struct Stats {
     pub alerts: usize,
 }
 
-pub fn run<R: BufRead>(
-    mut input: R,
-    parser: &dyn LogParser,
-    detectors: &mut [Box<dyn Detector>],
-    sink: &mut dyn AlertSink,
-) -> io::Result<Stats> {
-    let mut stats = Stats::default();
-    let mut buf = Vec::new();
+pub struct Pipeline<S> {
+    detectors: Vec<Box<dyn Detector>>,
+    sink: S,
+    stats: Stats,
+}
 
-    // Read raw bytes instead of `lines()`: attacker-controlled fields can
-    // carry invalid UTF-8, and one bad line must not stop the whole pipeline.
-    while input.read_until(b'\n', &mut buf)? > 0 {
-        stats.lines += 1;
-        let line = String::from_utf8_lossy(&buf);
-
-        if let Some(event) = parser.parse(line.trim_end_matches(['\n', '\r'])) {
-            stats.events += 1;
-            for detector in detectors.iter_mut() {
-                for alert in detector.evaluate(&event) {
-                    stats.alerts += 1;
-                    sink.emit(&alert)?;
-                }
-            }
+impl<S: AlertSink> Pipeline<S> {
+    pub fn new(detectors: Vec<Box<dyn Detector>>, sink: S) -> Self {
+        Self {
+            detectors,
+            sink,
+            stats: Stats::default(),
         }
-        buf.clear();
     }
 
-    Ok(stats)
+    /// Runs every detector on one event and emits what they raise, in order.
+    pub fn process(&mut self, event: &Event) -> io::Result<()> {
+        self.stats.events += 1;
+        for detector in self.detectors.iter_mut() {
+            for alert in detector.evaluate(event) {
+                self.stats.alerts += 1;
+                self.sink.emit(&alert)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads `input` to the end, parsing and processing each line.
+    pub fn run<R: BufRead>(&mut self, mut input: R, parser: &dyn LogParser) -> io::Result<()> {
+        let mut buf = Vec::new();
+
+        // Read raw bytes instead of `lines()`: attacker-controlled fields can
+        // carry invalid UTF-8, and one bad line must not stop the whole pipeline.
+        while input.read_until(b'\n', &mut buf)? > 0 {
+            self.stats.lines += 1;
+            let line = String::from_utf8_lossy(&buf);
+            if let Some(event) = parser.parse(line.trim_end_matches(['\n', '\r'])) {
+                self.process(&event)?;
+            }
+            buf.clear();
+        }
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Stats {
+        self.stats
+    }
+
+    pub fn into_sink(self) -> S {
+        self.sink
+    }
 }
 
 #[cfg(test)]
@@ -74,21 +99,45 @@ mod tests {
             );
         }
         let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
-        let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(SshBruteForce::new(2, Duration::seconds(60)))];
-        let mut sink = CollectSink::default();
+        let mut pipeline = Pipeline::new(
+            vec![Box::new(SshBruteForce::new(2, Duration::seconds(60)))],
+            CollectSink::default(),
+        );
 
-        let stats = run(input.as_slice(), &parser, &mut detectors, &mut sink).unwrap();
+        pipeline.run(input.as_slice(), &parser).unwrap();
 
         assert_eq!(
-            stats,
+            pipeline.stats(),
             Stats {
                 lines: 4,
                 events: 3,
                 alerts: 1
             }
         );
-        assert_eq!(sink.0.len(), 1);
-        assert!(matches!(sink.0[0].evidence, Evidence::Burst { event_count: 2, .. }));
+        let alerts = pipeline.into_sink().0;
+        assert_eq!(alerts.len(), 1);
+        assert!(matches!(alerts[0].evidence, Evidence::Burst { event_count: 2, .. }));
+    }
+
+    #[test]
+    fn processes_events_one_at_a_time_without_counting_lines() {
+        let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
+        let event = parser
+            .parse("Oct 22 10:00:00 srv01 sshd[2]: Failed password for root from 203.0.113.7 port 1 ssh2")
+            .unwrap();
+        let mut pipeline = Pipeline::new(vec![Box::new(TwoAlerts)], CollectSink::default());
+
+        pipeline.process(&event).unwrap();
+        pipeline.process(&event).unwrap();
+
+        assert_eq!(
+            pipeline.stats(),
+            Stats {
+                lines: 0,
+                events: 2,
+                alerts: 4
+            }
+        );
     }
 
     /// Fires twice for every event, like a rule plus a correlation over it.
@@ -113,13 +162,13 @@ mod tests {
     fn emits_every_alert_a_detector_returns_in_order() {
         let input = b"Oct 22 10:00:00 srv01 sshd[2]: Failed password for root from 203.0.113.7 port 1 ssh2\n";
         let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
-        let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(TwoAlerts)];
-        let mut sink = CollectSink::default();
+        let mut pipeline = Pipeline::new(vec![Box::new(TwoAlerts)], CollectSink::default());
 
-        let stats = run(input.as_slice(), &parser, &mut detectors, &mut sink).unwrap();
+        pipeline.run(input.as_slice(), &parser).unwrap();
 
-        assert_eq!(stats.alerts, 2);
-        let titles: Vec<_> = sink.0.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(pipeline.stats().alerts, 2);
+        let alerts = pipeline.into_sink().0;
+        let titles: Vec<_> = alerts.iter().map(|a| a.title.as_str()).collect();
         assert_eq!(titles, ["first", "second"]);
     }
 }

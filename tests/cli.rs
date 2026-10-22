@@ -1,5 +1,168 @@
-use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::UdpSocket;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::Duration;
+
+/// Forwards each line of a child's output to a channel, so tests can wait
+/// for a line with a timeout instead of hanging forever.
+fn lines_of(output: impl Read + Send + 'static) -> Receiver<String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(output).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+fn next_line(lines: &Receiver<String>) -> String {
+    lines
+        .recv_timeout(Duration::from_secs(10))
+        .expect("expected a line within 10 seconds")
+}
+
+fn interrupt(child: &Child) {
+    let status = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn watch_alerts_on_udp_syslog_and_stops_cleanly_on_interrupt() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--syslog-udp", "127.0.0.1:0", "--threshold", "10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = lines_of(child.stdout.take().unwrap());
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    let listening = next_line(&stderr);
+    let addr = listening
+        .strip_prefix("minisiem: listening for syslog on udp://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {listening}"));
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for i in 0..10 {
+        let frame = if i % 2 == 0 {
+            format!("<38>Oct 22 10:15:{i:02} srv01 sshd[1]: Failed password for root from 203.0.113.7 port {i} ssh2")
+        } else {
+            format!(
+                "<38>1 2026-10-22T10:15:{i:02}Z srv01 sshd-session 1 - - Failed password for admin from 203.0.113.7 port {i} ssh2"
+            )
+        };
+        sender.send_to(frame.as_bytes(), addr).unwrap();
+    }
+
+    let alert = next_line(&stdout);
+    assert!(
+        alert.starts_with(
+            "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=10 users=admin,root"
+        ),
+        "alert: {alert}"
+    );
+
+    interrupt(&child);
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0));
+    assert_eq!(next_line(&stderr), "minisiem: watch: events=10 alerts=1");
+}
+
+#[test]
+fn watch_needs_at_least_one_source() {
+    let output = minisiem(&["watch"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("required"), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn watch_refuses_to_listen_beyond_loopback_without_opt_in() {
+    let output = minisiem(&["watch", "--syslog-udp", "0.0.0.0:0"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with("minisiem: refusing to listen on 0.0.0.0:0"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+/// Starts `minisiem watch --journal` with a fake `journalctl` script.
+fn watch_journal(fake: &str) -> Child {
+    let script = format!("{}/tests/fixtures/fake-journalctl/{fake}", env!("CARGO_MANIFEST_DIR"));
+    Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--journal"])
+        .env("MINISIEM_JOURNALCTL", script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn watch_follows_journald_and_stops_cleanly_on_interrupt() {
+    let mut child = watch_journal("follow.sh");
+    let stdout = lines_of(child.stdout.take().unwrap());
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(
+        next_line(&stderr),
+        "minisiem: following journald (sshd, sshd-session, sshd-auth)"
+    );
+    let alert = next_line(&stdout);
+    assert!(
+        alert
+            .starts_with("[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=10"),
+        "alert: {alert}"
+    );
+
+    interrupt(&child);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert_eq!(next_line(&stderr), "minisiem: watch: events=11 alerts=1");
+}
+
+#[test]
+fn watch_exits_with_an_error_when_journalctl_stops() {
+    let mut child = watch_journal("exits.sh");
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    let lines: Vec<String> = stderr.iter().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("minisiem: journald: journalctl exited")),
+        "stderr: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Failed to iterate through journal: Bad message")),
+        "journalctl's own error is relayed: {lines:#?}"
+    );
+}
+
+#[test]
+fn watch_exits_with_an_error_without_permission_to_read_the_journal() {
+    let mut child = watch_journal("no-permission.sh");
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    let lines: Vec<String> = stderr.iter().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("minisiem: journald: cannot read the system journal")),
+        "stderr: {lines:#?}"
+    );
+}
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/auth.log");
 const BRUTE_FORCE_ALERT: &str = "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 \
@@ -18,6 +181,31 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
+}
+
+#[test]
+fn reads_journald_json_and_ignores_spoofed_sshd_entries() {
+    let journal = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json");
+
+    let output = minisiem(&[journal]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let alerts: Vec<_> = stdout(&output).lines().map(str::to_owned).collect();
+    assert_eq!(alerts.len(), 1, "alerts: {alerts:?}");
+    assert!(
+        alerts[0].starts_with(
+            "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=10 users=root"
+        ),
+        "alert: {}",
+        alerts[0]
+    );
+    // 12 "failures" from 198.51.100.99 written with `logger -t sshd`, and 12
+    // from 198.51.100.77 written by a binary copied to ~/sshd, are not sshd's.
+    assert!(
+        stderr(&output).contains("lines=36 events=11 alerts=1"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

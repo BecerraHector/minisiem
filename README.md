@@ -6,11 +6,13 @@ A small SIEM written in Rust, built phase by phase to learn detection engineerin
 cargo run -- tests/fixtures/auth.log
 cargo run -- --rules rules tests/fixtures/auth.log
 cargo run -- --threshold 5 --window 60 /var/log/auth.log
-journalctl -u sshd -o short-iso --no-pager | cargo run -- --rules rules
+journalctl -o json --no-pager _COMM=sshd-session | cargo run -- --rules rules
+cargo run -- watch --journal --syslog-udp 127.0.0.1:5514 --rules rules
 ```
 
-Alerts go to stdout, one per line; startup messages and a summary go to stderr.
-Exit codes: `0` success, `1` unreadable input or invalid rules, `2` invalid arguments.
+Alerts go to stdout, one per line, flushed as they happen; startup messages and a summary go
+to stderr. Exit codes: `0` success (or watch stopped with Ctrl+C), `1` unreadable input,
+invalid rules or a failed source, `2` invalid arguments.
 
 ## Phase 1: SSH brute force detection
 
@@ -113,6 +115,63 @@ incident and, for `value_count`, the distinct values:
 [MEDIUM] SSH user enumeration (T1110.001) src=203.0.113.7 host=srv01 group.src_ip=203.0.113.7 events=3 first_seen=... last_seen=... values=oracle,test,ubuntu
 ```
 
+## Phase 4a: input formats and watch mode
+
+### Formats
+
+Every input is read line by line and each line's format is detected on its own, so one stream
+can mix them:
+
+| Line starts with | Format |
+|------------------|--------|
+| `{` | journald entry from `journalctl -o json` |
+| `<` | network syslog: `<PRI>` + RFC 3164 (`Oct 22 10:15:32 host sshd[1]: ...`) or RFC 5424 (`1 2026-10-22T10:15:32Z host sshd 1 - - ...`) |
+| anything else | syslog file line (`/var/log/auth.log`, `/var/log/secure`, `journalctl -o short-iso`) |
+
+### Watch mode
+
+`minisiem watch` runs until Ctrl+C (or SIGTERM) and prints alerts as events arrive. It takes
+the same detection options as batch mode and at least one source:
+
+| Source | What it does |
+|--------|--------------|
+| `--journal` | Runs `journalctl --follow --output=json --lines=0` for the `sshd`, `sshd-session` and `sshd-auth` processes. Needs permission to read the system journal (root or the `systemd-journal` group). |
+| `--syslog-udp <ADDR>` | Receives syslog datagrams on `ADDR`, e.g. `127.0.0.1:5514`. One datagram is one message, up to 8 KiB. |
+
+To follow a log file, let `tail` handle rotation and pipe it into batch mode:
+
+```sh
+tail -F /var/log/auth.log | cargo run -- --rules rules
+```
+
+To feed it from rsyslog on the same host:
+
+```
+# /etc/rsyslog.d/minisiem.conf
+if $programname startswith 'sshd' then @127.0.0.1:5514;RSYSLOG_SyslogProtocol23Format
+```
+
+If a source stops (`journalctl` exits, the socket fails), watch reports it and exits with code 1:
+a source that silently stopped would be a blind spot.
+
+Events wait for the detectors in a queue of 10,000. When a flood fills it, new events are dropped
+instead of exhausting memory: the first drop prints a warning and the summary adds `dropped=N`.
+Dropping is itself a blind spot an attacker can cause on purpose, which is why it is never silent.
+Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog.
+
+### Trust model
+
+Detection is only as good as the events it is fed, and each source can be lied to differently:
+
+| Source | Who can forge an sshd event | What minisiem does |
+|--------|-----------------------------|--------------------|
+| journald | Harder, not impossible: a local user can still run an installed sshd binary with a preloaded library (`LD_PRELOAD`) that logs a fake message, and journald then records a genuine `_EXE` and `_COMM` | Requires `_COMM` to be an sshd process **and** `_EXE` to be an sshd binary under `/usr/`, which stops `logger -t sshd` (`SYSLOG_IDENTIFIER`) and binaries copied to `~/sshd` (`_COMM` alone). Not yet checked: `_UID`, which would also stop the preload case if every sshd message comes from a root process |
+| syslog files | Any local user, with `logger -t sshd "Failed password ..."` | Nothing can tell them apart in plain text; prefer journald |
+| syslog over UDP | Anyone who can reach the port, with any host name and timestamp | Binds loopback only unless `--allow-remote-syslog`; timestamps events on arrival so a forged date cannot reset detection windows |
+
+`journalctl` without permission does not fail: it warns and shows only your own entries. Watch
+treats that warning as a failed source instead of running blind.
+
 ## Architecture
 
 ```
@@ -120,19 +179,35 @@ raw line -> LogParser -> Event -> Detector -> Alert -> AlertSink
             (adapter)   (domain)  (domain)   (domain)  (adapter)
 ```
 
+In watch mode each source runs on its own thread and sends events through a channel to a single
+pipeline thread, so detectors keep their state without locks:
+
+```
+journald thread ──┐
+                  ├──> channel ──> Pipeline (detectors) ──> console
+UDP thread ───────┘       ^
+Ctrl+C / SIGTERM ─────────┘ (shutdown)
+```
+
 | Module | Role |
 |--------|------|
 | `event` | Normalized event model and the fields rules can use |
 | `alert` | Alert, severity, MITRE technique and evidence |
-| `ingestion` | `LogParser` port and the sshd adapter |
+| `ingestion` | `LogParser` port and the parsers: syslog lines, journald JSON, network syslog, per-line detection |
 | `detection` | `Detector` port, the brute force rule and the Sigma engine (rules, correlations, per-group state) |
 | `rule_loading` | Adapter that loads Sigma rule files from a directory into a validated rule set |
 | `alerting` | `AlertSink` port and the console adapter |
-| `pipeline` | Use case wiring parser, detectors and sink |
+| `pipeline` | Use case running detectors on events and delivering alerts |
+| `sources` | Live source adapters for watch mode (journald, syslog UDP) and the channel they feed |
 
 ## Known limitations
 
 - Syslog timestamps have no year or timezone: the current local ones are assumed
   (logs crossing New Year or a DST change get shifted).
-- Events must arrive in chronological order.
+- Events must arrive in chronological order; in watch mode, sources are interleaved as events
+  arrive, so slightly late events are tolerated but not reordered.
+- Lines are not length-limited in batch mode or from journald.
+- UDP datagrams the kernel drops because the socket buffer is full are not counted: under a flood
+  they never reach minisiem (a 300,000-datagram flood on a debug build delivered about 25,000).
+  Linux exposes them in `/proc/net/udp` and through `SO_RXQ_OVFL`.
 - A single group can still hold many entries if one source floods matches within one window.

@@ -7,10 +7,14 @@ use regex::Regex;
 use super::LogParser;
 use crate::event::{Event, EventKind, LogSource};
 
-/// `<timestamp> <host> <sshd|sshd-session>[pid]: <message>`
+/// OpenSSH server processes. Since OpenSSH 9.8 per-connection messages come
+/// from `sshd-session`; 10.0 split authentication into `sshd-auth`.
+pub const SSHD_PROCESSES: [&str; 3] = ["sshd", "sshd-session", "sshd-auth"];
+
+/// `<timestamp> <host> <sshd|sshd-session|sshd-auth>[pid]: <message>`
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2})) (?P<host>\S+) (?P<process>sshd(?:-session)?)\[\d+\]: (?P<message>.+)$",
+        r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2})) (?P<host>\S+) (?P<process>sshd(?:-session|-auth)?)\[\d+\]: (?P<message>.+)$",
     )
     .unwrap()
 });
@@ -71,26 +75,30 @@ fn classify(message: &str) -> Option<(EventKind, &str, IpAddr)> {
     })
 }
 
+/// Builds an event from an sshd message, whatever format carried it.
+/// Returns `None` for messages that are not about authentication.
+pub(super) fn sshd_event(timestamp: DateTime<Utc>, host: &str, process: &str, message: &str) -> Option<Event> {
+    let (kind, user, src_ip) = classify(message)?;
+    Some(Event {
+        timestamp,
+        host: host.to_string(),
+        process: process.to_string(),
+        kind,
+        user: user.to_string(),
+        src_ip,
+        message: message.to_string(),
+        logsource: LogSource::new("linux", "sshd"),
+    })
+}
+
 impl LogParser for SshdParser {
     fn parse(&self, line: &str) -> Option<Event> {
         let header = HEADER.captures(line)?;
-        let message = header.name("message")?.as_str();
-        let (kind, user, src_ip) = classify(message)?;
         let timestamp = self.parse_timestamp(
             header.name("iso").map(|m| m.as_str()),
             header.name("bsd").map(|m| m.as_str()),
         )?;
-
-        Some(Event {
-            timestamp,
-            host: header["host"].to_string(),
-            process: header["process"].to_string(),
-            kind,
-            user: user.to_string(),
-            src_ip,
-            message: message.to_string(),
-            logsource: LogSource::new("linux", "sshd"),
-        })
+        sshd_event(timestamp, &header["host"], &header["process"], &header["message"])
     }
 }
 

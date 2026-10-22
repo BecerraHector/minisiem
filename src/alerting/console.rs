@@ -16,6 +16,15 @@ impl<W: Write> ConsoleSink<W> {
 
 impl<W: Write> AlertSink for ConsoleSink<W> {
     fn emit(&mut self, alert: &Alert) -> io::Result<()> {
+        self.write_line(alert)?;
+        // A piped stdout is block-buffered: without a flush, a live alert can
+        // sit in a buffer where nobody sees it.
+        self.out.flush()
+    }
+}
+
+impl<W: Write> ConsoleSink<W> {
+    fn write_line(&mut self, alert: &Alert) -> io::Result<()> {
         write!(
             self.out,
             "[{}] {}{} src={} host={}",
@@ -228,6 +237,33 @@ mod tests {
                 values: values.into_iter().map(String::from).collect(),
             },
         }
+    }
+
+    /// Records how often it was flushed.
+    #[derive(Default)]
+    struct FlushCounter {
+        flushes: usize,
+    }
+
+    impl Write for FlushCounter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn flushes_every_alert_so_pipes_see_it_immediately() {
+        let mut sink = ConsoleSink::new(FlushCounter::default());
+
+        sink.emit(&burst_alert(vec!["root".into()])).unwrap();
+        sink.emit(&burst_alert(vec!["root".into()])).unwrap();
+
+        assert_eq!(sink.out.flushes, 2);
     }
 
     #[test]

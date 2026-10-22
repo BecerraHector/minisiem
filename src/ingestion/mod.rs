@@ -1,9 +1,14 @@
 //! Log ingestion (adapters). Each parser translates one raw log format into
 //! normalized [`Event`]s.
 
+mod auto;
+mod journal;
 mod sshd;
+mod syslog_net;
 
-pub use sshd::SshdParser;
+pub use auto::AutoParser;
+pub use journal::JournalParser;
+pub use sshd::{SSHD_PROCESSES, SshdParser};
 
 use crate::event::Event;
 
