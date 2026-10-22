@@ -47,7 +47,7 @@ pub fn run<R: BufRead>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alert::Alert;
+    use crate::alert::{Alert, Evidence};
     use crate::detection::SshBruteForce;
     use crate::ingestion::SshdParser;
     use chrono::{Duration, FixedOffset};
@@ -81,6 +81,6 @@ mod tests {
 
         assert_eq!(stats, Stats { lines: 4, events: 3, alerts: 1 });
         assert_eq!(sink.0.len(), 1);
-        assert_eq!(sink.0[0].event_count, 2);
+        assert!(matches!(sink.0[0].evidence, Evidence::Burst { event_count: 2, .. }));
     }
 }

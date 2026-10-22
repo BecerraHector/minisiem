@@ -4,14 +4,15 @@ use std::net::IpAddr;
 use chrono::Duration;
 
 use super::Detector;
-use crate::alert::{Alert, MitreTechnique, Severity};
+use crate::alert::{Alert, Evidence, MitreTechnique, Severity};
 use crate::event::{Event, EventKind};
 
-const PASSWORD_GUESSING: MitreTechnique = MitreTechnique {
-    id: "T1110.001",
-    name: "Password Guessing",
-    tactic: "Credential Access",
-};
+fn password_guessing() -> MitreTechnique {
+    MitreTechnique {
+        id: "T1110.001".into(),
+        name: Some("Password Guessing".into()),
+    }
+}
 
 /// Fires when one source IP accumulates `threshold` failed logins within a
 /// sliding time `window`. After firing, the counter for that IP resets, so a
@@ -60,16 +61,18 @@ impl Detector for SshBruteForce {
         users.dedup();
 
         Some(Alert {
-            rule_id: "ssh-brute-force",
-            title: "SSH brute force",
+            rule_id: "ssh-brute-force".into(),
+            title: "SSH brute force".into(),
             severity: Severity::High,
-            technique: PASSWORD_GUESSING,
+            techniques: vec![password_guessing()],
             src_ip: event.src_ip,
             host: event.host.clone(),
-            event_count: burst.len(),
-            first_seen: burst[0].timestamp,
-            last_seen: event.timestamp,
-            users,
+            evidence: Evidence::Burst {
+                event_count: burst.len(),
+                first_seen: burst[0].timestamp,
+                last_seen: event.timestamp,
+                users,
+            },
         })
     }
 }
@@ -77,6 +80,7 @@ impl Detector for SshBruteForce {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::LogSource;
     use chrono::{DateTime, TimeZone, Utc};
 
     fn at(secs: i64) -> DateTime<Utc> {
@@ -91,6 +95,8 @@ mod tests {
             kind,
             user: user.into(),
             src_ip: ip.parse().unwrap(),
+            message: String::new(),
+            logsource: LogSource::new("linux", "sshd"),
         }
     }
 
@@ -114,13 +120,18 @@ mod tests {
 
         assert_eq!(alert.rule_id, "ssh-brute-force");
         assert_eq!(alert.severity, Severity::High);
-        assert_eq!(alert.technique.id, "T1110.001");
+        assert_eq!(alert.techniques, vec![password_guessing()]);
         assert_eq!(alert.src_ip, "203.0.113.7".parse::<IpAddr>().unwrap());
         assert_eq!(alert.host, "srv01");
-        assert_eq!(alert.event_count, 3);
-        assert_eq!(alert.first_seen, at(0));
-        assert_eq!(alert.last_seen, at(60));
-        assert_eq!(alert.users, vec!["admin".to_string(), "root".to_string()]);
+        assert_eq!(
+            alert.evidence,
+            Evidence::Burst {
+                event_count: 3,
+                first_seen: at(0),
+                last_seen: at(60),
+                users: vec!["admin".to_string(), "root".to_string()],
+            }
+        );
     }
 
     #[test]
@@ -167,6 +178,6 @@ mod tests {
         assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 3)), None);
         assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 4)), None);
         let second = rule.evaluate(&failed("203.0.113.7", "root", 5)).expect("second burst fires");
-        assert_eq!(second.first_seen, at(3));
+        assert!(matches!(second.evidence, Evidence::Burst { first_seen, .. } if first_seen == at(3)));
     }
 }

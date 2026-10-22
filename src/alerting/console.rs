@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use super::AlertSink;
-use crate::alert::Alert;
+use crate::alert::{Alert, Evidence};
 
 /// Writes one human-readable line per alert.
 pub struct ConsoleSink<W: Write> {
@@ -16,51 +16,165 @@ impl<W: Write> ConsoleSink<W> {
 
 impl<W: Write> AlertSink for ConsoleSink<W> {
     fn emit(&mut self, alert: &Alert) -> io::Result<()> {
-        writeln!(
+        write!(
             self.out,
-            "[{}] {} ({} {}) src={} host={} failures={} users={} first_seen={} last_seen={}",
+            "[{}] {}{} src={} host={}",
             alert.severity,
             alert.title,
-            alert.technique.id,
-            alert.technique.name,
+            techniques(alert),
             alert.src_ip,
-            alert.host,
-            alert.event_count,
-            alert.users.join(","),
-            alert.first_seen.to_rfc3339(),
-            alert.last_seen.to_rfc3339(),
-        )
+            alert.host
+        )?;
+
+        match &alert.evidence {
+            Evidence::Burst { event_count, first_seen, last_seen, users } => writeln!(
+                self.out,
+                " failures={event_count} users={} first_seen={} last_seen={}",
+                escape_control(&users.join(",")),
+                first_seen.to_rfc3339(),
+                last_seen.to_rfc3339(),
+            ),
+            Evidence::Event(event) => writeln!(
+                self.out,
+                " user={} event_kind={} time={} message={:?}",
+                escape_control(&event.user),
+                event.kind.as_str(),
+                event.timestamp.to_rfc3339(),
+                // Debug formatting quotes the message and escapes control characters.
+                event.message,
+            ),
+        }
     }
+}
+
+/// ` (T1110.001 Password Guessing, T1078)`, or empty when there are none.
+fn techniques(alert: &Alert) -> String {
+    if alert.techniques.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = alert
+        .techniques
+        .iter()
+        .map(|t| match &t.name {
+            Some(name) => format!("{} {name}", t.id),
+            None => t.id.clone(),
+        })
+        .collect();
+    format!(" ({})", list.join(", "))
+}
+
+/// Log fields can be attacker-controlled: escape control characters so they
+/// cannot inject terminal escape sequences or fake extra lines.
+fn escape_control(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { c.escape_unicode().to_string() } else { c.to_string() })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::alert::{MitreTechnique, Severity};
+    use crate::event::{Event, EventKind, LogSource};
     use chrono::{TimeZone, Utc};
 
-    #[test]
-    fn writes_one_line_per_alert() {
-        let alert = Alert {
-            rule_id: "ssh-brute-force",
-            title: "SSH brute force",
+    fn render(alert: &Alert) -> String {
+        let mut sink = ConsoleSink::new(Vec::new());
+        sink.emit(alert).unwrap();
+        String::from_utf8(sink.out).unwrap()
+    }
+
+    fn burst_alert(users: Vec<String>) -> Alert {
+        Alert {
+            rule_id: "ssh-brute-force".into(),
+            title: "SSH brute force".into(),
             severity: Severity::High,
-            technique: MitreTechnique { id: "T1110.001", name: "Password Guessing", tactic: "Credential Access" },
+            techniques: vec![MitreTechnique { id: "T1110.001".into(), name: Some("Password Guessing".into()) }],
             src_ip: "203.0.113.7".parse().unwrap(),
             host: "srv01".into(),
-            event_count: 3,
-            first_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 0, 0).unwrap(),
-            last_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 1, 0).unwrap(),
-            users: vec!["admin".into(), "root".into()],
+            evidence: Evidence::Burst {
+                event_count: 3,
+                first_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 0, 0).unwrap(),
+                last_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 1, 0).unwrap(),
+                users,
+            },
+        }
+    }
+
+    fn event_alert(techniques: Vec<MitreTechnique>, user: &str, message: &str) -> Alert {
+        let event = Event {
+            timestamp: Utc.with_ymd_and_hms(2026, 10, 22, 10, 17, 5).unwrap(),
+            host: "srv01".into(),
+            process: "sshd".into(),
+            kind: EventKind::SuccessfulLogin,
+            user: user.into(),
+            src_ip: "203.0.113.7".parse().unwrap(),
+            message: message.into(),
+            logsource: LogSource::new("linux", "sshd"),
         };
-        let mut sink = ConsoleSink::new(Vec::new());
+        Alert {
+            rule_id: "6c1b8f7e".into(),
+            title: "SSH login as root".into(),
+            severity: Severity::Medium,
+            techniques,
+            src_ip: event.src_ip,
+            host: event.host.clone(),
+            evidence: Evidence::Event(event),
+        }
+    }
 
-        sink.emit(&alert).unwrap();
-
+    #[test]
+    fn writes_one_line_per_burst_alert() {
         assert_eq!(
-            String::from_utf8(sink.out).unwrap(),
+            render(&burst_alert(vec!["admin".into(), "root".into()])),
             "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=3 \
              users=admin,root first_seen=2026-10-22T10:00:00+00:00 last_seen=2026-10-22T10:01:00+00:00\n"
         );
+    }
+
+    #[test]
+    fn writes_single_event_alert_with_unnamed_technique() {
+        let alert = event_alert(
+            vec![MitreTechnique { id: "T1078.003".into(), name: None }],
+            "root",
+            "Accepted password for root from 203.0.113.7 port 52100 ssh2",
+        );
+
+        assert_eq!(
+            render(&alert),
+            "[MEDIUM] SSH login as root (T1078.003) src=203.0.113.7 host=srv01 user=root \
+             event_kind=successful_login time=2026-10-22T10:17:05+00:00 \
+             message=\"Accepted password for root from 203.0.113.7 port 52100 ssh2\"\n"
+        );
+    }
+
+    #[test]
+    fn lists_several_techniques_and_omits_parentheses_when_there_are_none() {
+        let several = event_alert(
+            vec![
+                MitreTechnique { id: "T1078".into(), name: None },
+                MitreTechnique { id: "T1021.004".into(), name: Some("SSH".into()) },
+            ],
+            "root",
+            "x",
+        );
+        let none = event_alert(vec![], "root", "x");
+
+        assert!(render(&several).starts_with("[MEDIUM] SSH login as root (T1078, T1021.004 SSH) src="));
+        assert!(render(&none).starts_with("[MEDIUM] SSH login as root src="));
+    }
+
+    #[test]
+    fn escapes_control_characters_from_attacker_controlled_fields() {
+        // An attacker picks the username: an ESC sequence must never reach the
+        // analyst's terminal raw.
+        let burst = render(&burst_alert(vec!["\x1b[2J".into()]));
+        let event = render(&event_alert(vec![], "\x1b[2J", "Invalid user \x1b[2J from"));
+
+        assert!(!burst.contains('\x1b') && !event.contains('\x1b'));
+        assert!(burst.contains("users=\\u{1b}[2J "), "{burst}");
+        assert!(event.contains("user=\\u{1b}[2J "), "{event}");
+        assert!(event.contains("message=\"Invalid user \\u{1b}[2J from\""), "{event}");
     }
 }

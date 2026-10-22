@@ -13,6 +13,35 @@ pub enum EventKind {
     SuccessfulLogin,
 }
 
+impl EventKind {
+    /// Stable name used by detection rules (the `event_kind` field).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::FailedLogin => "failed_login",
+            EventKind::InvalidUser => "invalid_user",
+            EventKind::SuccessfulLogin => "successful_login",
+        }
+    }
+}
+
+/// Where an event comes from, using Sigma's `logsource` vocabulary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogSource {
+    pub product: Option<String>,
+    pub service: Option<String>,
+    pub category: Option<String>,
+}
+
+impl LogSource {
+    pub fn new(product: &str, service: &str) -> Self {
+        Self {
+            product: Some(product.into()),
+            service: Some(service.into()),
+            category: None,
+        }
+    }
+}
+
 /// A normalized security event. Every log source is translated into this
 /// shape so detection rules never depend on a specific log format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,4 +52,7 @@ pub struct Event {
     pub kind: EventKind,
     pub user: String,
     pub src_ip: IpAddr,
+    /// The original log message, without the syslog header.
+    pub message: String,
+    pub logsource: LogSource,
 }
