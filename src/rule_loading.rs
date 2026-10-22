@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::detection::sigma::SigmaRule;
+use crate::detection::sigma::{RuleSet, parse_documents};
 
 #[derive(Debug)]
 pub struct LoadError {
@@ -29,21 +29,22 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// Loads every `*.yml` / `*.yaml` file under `dir`, in path order. The first
-/// invalid rule aborts loading: a rule that silently fails to load is a
-/// detection gap nobody knows about.
-pub fn load_dir(dir: &Path) -> Result<Vec<SigmaRule>, LoadError> {
+/// Loads every `*.yml` / `*.yaml` file under `dir`, in path order, and links
+/// correlations to the rules they reference (which may live in other files).
+/// The first invalid rule aborts loading: a rule that silently fails to load
+/// is a detection gap nobody knows about.
+pub fn load_dir(dir: &Path) -> Result<RuleSet, LoadError> {
     let mut files = Vec::new();
     collect_rule_files(dir, &mut files)?;
     files.sort();
 
-    files
-        .iter()
-        .map(|path| {
-            let yaml = fs::read_to_string(path).map_err(|e| LoadError::new(path, e))?;
-            SigmaRule::from_yaml(&yaml).map_err(|e| LoadError::new(path, e))
-        })
-        .collect()
+    let mut documents = Vec::new();
+    for path in &files {
+        let yaml = fs::read_to_string(path).map_err(|e| LoadError::new(path, e))?;
+        documents.extend(parse_documents(&yaml).map_err(|e| LoadError::new(path, e))?);
+    }
+    // Cross-file problems (unknown references, cycles) belong to the directory.
+    RuleSet::new(documents).map_err(|e| LoadError::new(dir, e))
 }
 
 /// Recurses into real directories only: symlinked directories are skipped so

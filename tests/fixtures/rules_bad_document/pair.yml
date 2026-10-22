@@ -1,0 +1,15 @@
+title: Failed login
+name: failed
+detection:
+  selection:
+    event_kind: failed_login
+  condition: selection
+---
+title: Too few failures
+correlation:
+  type: event_count
+  rules:
+    - failed
+  timespan: 5m
+  condition:
+    lt: 3

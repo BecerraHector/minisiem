@@ -1,0 +1,8 @@
+title: Orphan burst
+correlation:
+  type: event_count
+  rules:
+    - missing
+  timespan: 5m
+  condition:
+    gte: 3

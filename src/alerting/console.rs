@@ -48,6 +48,27 @@ impl<W: Write> AlertSink for ConsoleSink<W> {
                 // Debug formatting quotes the message and escapes control characters.
                 event.message,
             ),
+            Evidence::Correlation {
+                group,
+                event_count,
+                first_seen,
+                last_seen,
+                values,
+            } => {
+                for (field, value) in group {
+                    write!(self.out, " group.{field}={}", escape_control(value))?;
+                }
+                write!(
+                    self.out,
+                    " events={event_count} first_seen={} last_seen={}",
+                    first_seen.to_rfc3339(),
+                    last_seen.to_rfc3339()
+                )?;
+                if !values.is_empty() {
+                    write!(self.out, " values={}", escape_control(&values.join(",")))?;
+                }
+                writeln!(self.out)
+            }
         }
     }
 }
@@ -188,16 +209,62 @@ mod tests {
         assert!(render(&none).starts_with("[MEDIUM] SSH login as root src="));
     }
 
+    fn correlation_alert(group: Vec<(&str, &str)>, values: Vec<&str>) -> Alert {
+        Alert {
+            rule_id: "ssh-user-enumeration".into(),
+            title: "SSH user enumeration".into(),
+            severity: Severity::Medium,
+            techniques: vec![MitreTechnique {
+                id: "T1087".into(),
+                name: None,
+            }],
+            src_ip: "203.0.113.7".parse().unwrap(),
+            host: "srv01".into(),
+            evidence: Evidence::Correlation {
+                group: group.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                event_count: 3,
+                first_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 0, 0).unwrap(),
+                last_seen: Utc.with_ymd_and_hms(2026, 10, 22, 10, 1, 0).unwrap(),
+                values: values.into_iter().map(String::from).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn writes_correlation_alert_with_group_and_values() {
+        let alert = correlation_alert(
+            vec![("src_ip", "203.0.113.7"), ("host", "srv01")],
+            vec!["admin", "oracle", "test"],
+        );
+
+        assert_eq!(
+            render(&alert),
+            "[MEDIUM] SSH user enumeration (T1087) src=203.0.113.7 host=srv01 group.src_ip=203.0.113.7 \
+             group.host=srv01 events=3 first_seen=2026-10-22T10:00:00+00:00 \
+             last_seen=2026-10-22T10:01:00+00:00 values=admin,oracle,test\n"
+        );
+    }
+
+    #[test]
+    fn omits_values_when_the_correlation_counted_none() {
+        let alert = correlation_alert(vec![("src_ip", "203.0.113.7")], vec![]);
+
+        assert!(render(&alert).ends_with("last_seen=2026-10-22T10:01:00+00:00\n"));
+    }
+
     #[test]
     fn escapes_control_characters_from_attacker_controlled_fields() {
         // An attacker picks the username: an ESC sequence must never reach the
         // analyst's terminal raw.
         let burst = render(&burst_alert(vec!["\x1b[2J".into()]));
         let event = render(&event_alert(vec![], "\x1b[2J", "Invalid user \x1b[2J from"));
+        let correlation = render(&correlation_alert(vec![("user", "\x1b[2J")], vec!["\x1b[2J"]));
 
-        assert!(!burst.contains('\x1b') && !event.contains('\x1b'));
+        assert!(!burst.contains('\x1b') && !event.contains('\x1b') && !correlation.contains('\x1b'));
         assert!(burst.contains("users=\\u{1b}[2J "), "{burst}");
         assert!(event.contains("user=\\u{1b}[2J "), "{event}");
         assert!(event.contains("message=\"Invalid user \\u{1b}[2J from\""), "{event}");
+        assert!(correlation.contains("group.user=\\u{1b}[2J "), "{correlation}");
+        assert!(correlation.contains("values=\\u{1b}[2J\n"), "{correlation}");
     }
 }

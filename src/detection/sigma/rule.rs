@@ -16,6 +16,8 @@ use crate::event::{Event, LogSource};
 #[derive(Debug)]
 pub struct SigmaRule {
     pub id: Option<String>,
+    /// Name other rules (correlations) use to reference this one.
+    pub name: Option<String>,
     pub title: String,
     pub severity: Severity,
     pub techniques: Vec<MitreTechnique>,
@@ -74,17 +76,19 @@ impl fmt::Display for RuleError {
 
 impl std::error::Error for RuleError {}
 
-/// The YAML document as written; validated and converted by `from_yaml`.
+/// One YAML document as written, either a detection or a correlation rule.
 #[derive(Deserialize)]
-struct RawRule {
-    title: Option<String>,
-    id: Option<String>,
-    level: Option<String>,
+pub(super) struct RawRule {
+    pub(super) title: Option<String>,
+    pub(super) id: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) level: Option<String>,
     #[serde(default)]
-    tags: Vec<String>,
+    pub(super) tags: Vec<String>,
     #[serde(default)]
     logsource: RawLogSource,
-    detection: Option<Value>,
+    pub(super) detection: Option<Value>,
+    pub(super) correlation: Option<Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -99,14 +103,32 @@ static TECHNIQUE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^attac
 /// Upper bound for compiled `|re` patterns, so a rule cannot exhaust memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
-fn error<T>(message: impl Into<String>) -> Result<T, RuleError> {
+pub(super) fn error<T>(message: impl Into<String>) -> Result<T, RuleError> {
     Err(RuleError(message.into()))
 }
 
+/// MITRE techniques from `attack.tNNNN[.NNN]` tags; other tags are ignored.
+pub(super) fn techniques_from_tags(tags: &[String]) -> Vec<MitreTechnique> {
+    tags.iter()
+        .filter_map(|tag| TECHNIQUE_TAG.captures(tag))
+        .map(|caps| MitreTechnique {
+            id: caps[1].to_uppercase(),
+            name: None,
+        })
+        .collect()
+}
+
 impl SigmaRule {
+    /// Parses a single-document detection rule.
     pub fn from_yaml(yaml: &str) -> Result<Self, RuleError> {
         let raw: RawRule = serde_saphyr::from_str(yaml).map_err(|e| RuleError(format!("invalid YAML: {e}")))?;
+        Self::from_raw(raw)
+    }
 
+    pub(super) fn from_raw(raw: RawRule) -> Result<Self, RuleError> {
+        if raw.correlation.is_some() {
+            return error("a rule cannot have both 'detection' and 'correlation'");
+        }
         let Some(title) = raw.title else {
             return error("missing 'title'");
         };
@@ -140,17 +162,10 @@ impl SigmaRule {
 
         Ok(SigmaRule {
             id: raw.id,
+            name: raw.name,
             title,
             severity: parse_level(raw.level.as_deref())?,
-            techniques: raw
-                .tags
-                .iter()
-                .filter_map(|tag| TECHNIQUE_TAG.captures(tag))
-                .map(|caps| MitreTechnique {
-                    id: caps[1].to_uppercase(),
-                    name: None,
-                })
-                .collect(),
+            techniques: techniques_from_tags(&raw.tags),
             logsource: LogSource {
                 product: raw.logsource.product,
                 service: raw.logsource.service,
@@ -162,7 +177,7 @@ impl SigmaRule {
     }
 }
 
-fn parse_level(level: Option<&str>) -> Result<Severity, RuleError> {
+pub(super) fn parse_level(level: Option<&str>) -> Result<Severity, RuleError> {
     match level {
         None | Some("medium") => Ok(Severity::Medium),
         Some("informational") => Ok(Severity::Informational),

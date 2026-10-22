@@ -1,11 +1,16 @@
 //! A subset of the Sigma rule format (https://sigmahq.io).
 
 pub mod condition;
-mod detector;
+pub mod correlation;
+mod correlation_state;
+mod engine;
 mod matching;
 pub mod rule;
+pub mod ruleset;
 mod value;
 mod wildcard;
 
-pub use detector::SigmaDetector;
+pub use correlation::{CorrelationRule, RuleDocument, parse_documents};
+pub use engine::SigmaEngine;
 pub use rule::{RuleError, SigmaRule};
+pub use ruleset::RuleSet;

@@ -93,18 +93,62 @@ fn shipped_sigma_rules_add_alerts_in_event_order() {
         "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=oracle event_kind=invalid_user",
         "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=test event_kind=invalid_user",
         "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=ubuntu event_kind=invalid_user",
+        "[MEDIUM] SSH user enumeration (T1110.001) src=203.0.113.7 host=srv01 group.src_ip=203.0.113.7 events=3",
         BRUTE_FORCE_ALERT,
         "[MEDIUM] SSH login from public IP (T1078, T1021.004) src=203.0.113.7 host=srv01 user=root \
          event_kind=successful_login",
         "[HIGH] SSH login as root (T1078.003) src=203.0.113.7 host=srv01 user=root event_kind=successful_login",
+        "[CRITICAL] SSH login after brute force (T1110.001, T1078) src=203.0.113.7 host=srv01 \
+         group.src_ip=203.0.113.7 events=11",
     ];
     assert_eq!(alerts.len(), expected_prefixes.len(), "alerts: {alerts:#?}");
     for (alert, prefix) in alerts.iter().zip(expected_prefixes) {
         assert!(alert.starts_with(prefix), "\nalert:  {alert}\nprefix: {prefix}");
     }
-    assert!(alerts[5].ends_with("message=\"Accepted password for root from 203.0.113.7 port 52100 ssh2\""));
-    assert!(stderr(&output).contains(&format!("minisiem: loaded 3 sigma rules from {rules}")));
-    assert!(stderr(&output).contains("alerts=6"));
+    assert!(alerts[3].ends_with("values=oracle,test,ubuntu"));
+    assert!(alerts[6].ends_with("message=\"Accepted password for root from 203.0.113.7 port 52100 ssh2\""));
+    // The chained alert spans the whole incident: it starts with the burst.
+    let first_seen = |alert: &str| {
+        alert
+            .split(' ')
+            .find(|f| f.starts_with("first_seen="))
+            .map(str::to_owned)
+    };
+    assert_eq!(first_seen(&alerts[7]), first_seen(&alerts[4]));
+    assert!(stderr(&output).contains(&format!("minisiem: loaded 9 sigma rules from {rules}")));
+    assert!(stderr(&output).contains("alerts=8"));
+}
+
+#[test]
+fn refuses_to_start_with_a_correlation_referencing_an_unknown_rule() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rules_bad_reference");
+
+    let output = minisiem(&["--rules", rules, FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(
+        message.starts_with(&format!(
+            "minisiem: {rules}: correlation 'Orphan burst': unknown rule 'missing'"
+        )),
+        "stderr: {message}"
+    );
+}
+
+#[test]
+fn names_the_invalid_document_of_a_multi_document_file() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rules_bad_document");
+
+    let output = minisiem(&["--rules", rules, FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(
+        message.contains("rules_bad_document/pair.yml: document 2: "),
+        "stderr: {message}"
+    );
+    assert!(message.contains("'lt' is not supported"), "stderr: {message}");
 }
 
 #[test]
