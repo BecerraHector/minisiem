@@ -265,6 +265,15 @@ mod tests {
             classified("Failed password for invalid user oracle from 203.0.113.7 port 40000"),
             (EventKind::FailedLogin, "oracle".to_string(), real)
         );
+        // So were empty usernames.
+        assert_eq!(
+            classified("Failed none for invalid user  from 203.0.113.7 port 40000 ssh2"),
+            (EventKind::FailedLogin, String::new(), real)
+        );
+        assert_eq!(
+            classified("Invalid user  from 203.0.113.7 port 40000"),
+            (EventKind::InvalidUser, String::new(), real)
+        );
     }
 
     #[test]

@@ -342,4 +342,13 @@ mod tests {
         );
         assert!(correlation.contains(r#" values=root,"a,b""#), "{correlation}");
     }
+
+    #[test]
+    fn quoted_values_still_escape_control_characters() {
+        let event = render(&event_alert(vec![], "x \x1b[2J\nfake", "Invalid user"));
+
+        assert!(!event.contains('\x1b'), "{event}");
+        assert_eq!(event.lines().count(), 1, "{event}");
+        assert!(event.contains(r#" user="x \u{1b}[2J\nfake" "#), "{event}");
+    }
 }
