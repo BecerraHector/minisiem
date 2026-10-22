@@ -22,7 +22,7 @@ Branch: `feat/minisiem-sigma-rules` · Delivery: single PR, work-unit commits (f
 | T1 | S7, S8 | inline | done | RED: compile errors; GREEN: 20 unit + 5 CLI |
 | T2 | S6 | inline | done | RED: 14 failing; GREEN: 34 unit |
 | T3 | S3, S4, S5 | inline | done | RED: 16 failing; GREEN: 50 unit |
-| T4 | S4, S5, S7, S8 | inline | pending | |
+| T4 | S4, S5, S7, S8 | inline | done | RED: 14 failing; GREEN: 64 unit + 5 CLI |
 | T5 | S2, S8, S9 | inline | pending | |
 
 - T1: generalize domain (`Event` gets raw message and logsource, `Alert` owns strings, `Severity::Informational`) without changing phase 1 output.

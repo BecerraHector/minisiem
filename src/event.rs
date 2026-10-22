@@ -60,4 +60,16 @@ pub struct Event {
 impl Event {
     /// Field names detection rules can match on.
     pub const FIELDS: [&'static str; 5] = ["host", "process", "user", "src_ip", "event_kind"];
+
+    /// Value of one of [`Event::FIELDS`], or `None` for unknown names.
+    pub fn field(&self, name: &str) -> Option<String> {
+        match name {
+            "host" => Some(self.host.clone()),
+            "process" => Some(self.process.clone()),
+            "user" => Some(self.user.clone()),
+            "src_ip" => Some(self.src_ip.to_string()),
+            "event_kind" => Some(self.kind.as_str().to_string()),
+            _ => None,
+        }
+    }
 }
