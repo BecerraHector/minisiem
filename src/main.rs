@@ -9,7 +9,7 @@ use clap::Parser;
 use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
-use minisiem::ingestion::SshdParser;
+use minisiem::ingestion::AutoParser;
 use minisiem::pipeline::Pipeline;
 use minisiem::rule_loading;
 
@@ -81,7 +81,7 @@ fn main() -> ExitCode {
 
     // Syslog timestamps lack year and timezone: assume the current local ones.
     let now = Local::now();
-    let parser = SshdParser::new(now.year(), now.offset().fix());
+    let parser = AutoParser::new(now.year(), now.offset().fix());
     let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
 
     match pipeline.run(input, &parser) {

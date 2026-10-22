@@ -21,6 +21,30 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn reads_journald_json_and_ignores_entries_spoofed_with_logger() {
+    let journal = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json");
+
+    let output = minisiem(&[journal]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let alerts: Vec<_> = stdout(&output).lines().map(str::to_owned).collect();
+    assert_eq!(alerts.len(), 1, "alerts: {alerts:?}");
+    assert!(
+        alerts[0].starts_with(
+            "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=10 users=root"
+        ),
+        "alert: {}",
+        alerts[0]
+    );
+    // 12 "failures" written with `logger -t sshd` from 198.51.100.99 are not sshd's.
+    assert!(
+        stderr(&output).contains("lines=24 events=11 alerts=1"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn detects_brute_force_in_a_log_file() {
     let output = minisiem(&[FIXTURE]);
 

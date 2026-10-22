@@ -1,8 +1,12 @@
 //! Log ingestion (adapters). Each parser translates one raw log format into
 //! normalized [`Event`]s.
 
+mod auto;
+mod journal;
 mod sshd;
 
+pub use auto::AutoParser;
+pub use journal::JournalParser;
 pub use sshd::SshdParser;
 
 use crate::event::Event;
