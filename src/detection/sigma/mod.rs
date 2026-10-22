@@ -2,6 +2,7 @@
 
 pub mod condition;
 pub mod correlation;
+mod correlation_state;
 mod detector;
 mod matching;
 pub mod rule;

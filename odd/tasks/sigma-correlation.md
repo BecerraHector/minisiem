@@ -23,7 +23,7 @@ Branch: `feat/sigma-correlation` · Delivery: single PR, work-unit commits (fore
 |----|-------|-------|--------|----------|
 | T1 | S7, S10 | inline | done | RED: trait mismatch; GREEN: 67 unit + 9 CLI |
 | T2 | S2, S3, S4, S5, S6 | inline | done | RED: 20 failing; GREEN: 87 unit + 9 CLI |
-| T3 | S8, S9 | inline | pending | |
+| T3 | S8, S9 | inline | done | RED: 11 failing; GREEN: 98 unit (dead_code warnings until T4) |
 | T4 | S5, S7, S8 | inline | pending | |
 | T5 | S9 | inline | pending | |
 | T6 | S11 | inline | pending | |
