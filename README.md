@@ -154,6 +154,11 @@ if $programname startswith 'sshd' then @127.0.0.1:5514;RSYSLOG_SyslogProtocol23F
 If a source stops (`journalctl` exits, the socket fails), watch reports it and exits with code 1:
 a source that silently stopped would be a blind spot.
 
+Events wait for the detectors in a queue of 10,000. When a flood fills it, new events are dropped
+instead of exhausting memory: the first drop prints a warning and the summary adds `dropped=N`.
+Dropping is itself a blind spot an attacker can cause on purpose, which is why it is never silent.
+Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog.
+
 ### Trust model
 
 Detection is only as good as the events it is fed, and each source can be lied to differently:
@@ -202,4 +207,7 @@ Ctrl+C / SIGTERM ─────────┘ (shutdown)
 - Events must arrive in chronological order; in watch mode, sources are interleaved as events
   arrive, so slightly late events are tolerated but not reordered.
 - Lines are not length-limited in batch mode or from journald.
+- UDP datagrams the kernel drops because the socket buffer is full are not counted: under a flood
+  they never reach minisiem (a 300,000-datagram flood on a debug build delivered about 25,000).
+  Linux exposes them in `/proc/net/udp` and through `SO_RXQ_OVFL`.
 - A single group can still hold many entries if one source floods matches within one window.

@@ -1,12 +1,11 @@
 //! Syslog over UDP.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
 use chrono::{DateTime, Utc};
 
-use super::Message;
+use super::Outlet;
 use crate::event::Event;
 use crate::ingestion::LogParser;
 
@@ -38,8 +37,8 @@ impl SyslogUdp {
         self.socket.local_addr().expect("bound socket has an address")
     }
 
-    /// Reads datagrams on a new thread until the channel closes.
-    pub fn spawn<P: LogParser + Send + 'static>(self, parser: P, events: Sender<Message>) -> JoinHandle<()> {
+    /// Reads datagrams on a new thread until the pipeline is gone.
+    pub fn spawn<P: LogParser + Send + 'static>(self, parser: P, outlet: Outlet) -> JoinHandle<()> {
         thread::spawn(move || {
             let source = format!("udp://{}", self.local_addr());
             let mut buf = vec![0; MAX_DATAGRAM];
@@ -47,16 +46,12 @@ impl SyslogUdp {
                 let len = match self.socket.recv_from(&mut buf) {
                     Ok((len, _sender)) => len,
                     Err(error) => {
-                        let _ = events.send(Message::Failed {
-                            source,
-                            error: error.to_string(),
-                        });
+                        outlet.fail(&source, error.to_string());
                         return;
                     }
                 };
-                // A closed channel means the pipeline is gone: stop quietly.
                 if let Some(event) = event_from_datagram(&buf[..len], &parser, Utc::now())
-                    && events.send(Message::Event(event)).is_err()
+                    && !outlet.event(event)
                 {
                     return;
                 }
@@ -134,8 +129,8 @@ mod tests {
     fn spawned_reader_forwards_parsed_events() {
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let addr = udp.local_addr();
-        let (tx, rx) = std::sync::mpsc::channel();
-        udp.spawn(parser(), tx);
+        let (outlet, inlet) = super::super::channel(10);
+        udp.spawn(parser(), outlet);
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender.send_to(b"<38>hello", addr).unwrap();
@@ -146,7 +141,7 @@ mod tests {
             )
             .unwrap();
 
-        let message = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-        assert!(matches!(message, Message::Event(event) if event.src_ip.to_string() == "203.0.113.7"));
+        let event = inlet.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(event.src_ip.to_string(), "203.0.113.7");
     }
 }

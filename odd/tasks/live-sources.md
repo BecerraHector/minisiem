@@ -26,7 +26,7 @@ Branch: `feat/live-sources` · Delivery: single PR, work-unit commits (forecast 
 | T4 | S4 | inline | done | refactor only (shared `DetectionArgs`, `analyze`); the `watch` subcommand lands with T5 so no commit ships a stub. GREEN: 118 unit + 12 CLI unchanged |
 | T5 | S4, S5, S6 | inline | done | RED: 9 unit + 3 CLI; GREEN: 127 unit + 15 CLI; UDP watch test stable 10/10 |
 | T8 | S9 | inline | done | RED: `/home/mallory/sshd` entry produced an event; GREEN: 132 unit + 18 CLI (fixture: 12 copied-binary spoofs ignored) |
-| T9 | S10 | inline | pending | |
+| T9 | S10 | inline | done | RED: 8 failing; GREEN: 135 unit + 18 CLI; flood probe: RSS 39 MB, Ctrl+C stop 127 ms with backlog |
 | T6 | S3, S4, S6, S8 | inline | done | RED: 3 unit; GREEN: 130 unit + 18 CLI; watch tests 10/10, no orphan journalctl |
 
 - T1: `Pipeline` struct usable event by event; console sink flushes per alert.
@@ -42,6 +42,7 @@ Routes: all inline (sequential tasks, no writer trigger).
 
 - **L1** (2026-10-22) User: "arranquemos con la 4a"
 - **L2** Environment: OpenSSH 10.6 (per-connection logs come from `sshd-session`; `sshd-auth` exists since 10.0 and is accepted defensively), systemd 262. A real journal entry showed `SYSLOG_IDENTIFIER` differing from `_COMM`: only underscore fields are set by journald. Crates: `serde_json` 1.0, `ctrlc` 3.5.
+- **L8** T9 flood probe (300,000 UDP datagrams, debug build): 24,665 events processed, `dropped` stayed 0 because the kernel socket buffer dropped the rest before minisiem read them; the parsing UDP thread is the bottleneck, not the queue. Kernel drops are documented as a known limitation and become a follow-up issue (`/proc/net/udp`, `SO_RXQ_OVFL`). A first probe attempt failed because of a script bug (`&` backgrounded the whole `cd && S=... && minisiem` chain), not because of minisiem.
 - **L7** (2026-10-22) User: "dale corrigamos estas 2 ahora" (fix R1-comm-spoofable and the unbounded channel before the PR; the other advisories become issues).
 - **L6** Verification: native assess `high` (executable fixtures + escalated item 4). Independent verifier: S1-S8 PASS, no blockers, 6 advisories; parent spot check: batch output with `--rules` hashes identically at `6d86864` and HEAD. User granted native review (lenses risk, resilience, reliability): approved and acknowledged (lineage `review-25f0dd1fb9620326`), 8 non-blocking advisories: R1-comm-spoofable, R1-journalctl-env-override, R1-unbounded-channel, R3-ctrlc-journal-race, R3-read-error-hang, R3-stale-parser-year, R4-shutdown-queued-behind-backlog, R4-unbounded-event-channel. Pending user decision on follow-ups. Not pushed.
 - **L5** T6: `MINISIEM_JOURNALCTL` overrides the `journalctl` binary so CLI tests run fake scripts (follow, exit, no permission). The reader thread joins the stderr relay before reporting a stopped source, so journalctl's last error is always printed. Orphan check: `pgrep -f "sleep 600"` matched the checking shell itself; `pgrep -x sleep` showed no leftover processes.

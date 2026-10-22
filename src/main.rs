@@ -3,7 +3,6 @@ use std::io::{self, BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::mpsc;
 
 use chrono::{Datelike, Duration, Local, Offset};
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -14,7 +13,7 @@ use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
 use minisiem::pipeline::Pipeline;
 use minisiem::rule_loading;
-use minisiem::sources::{JournalFollow, Message, Stop, SyslogUdp, drain};
+use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain};
 
 /// Detect attacks in sshd logs.
 ///
@@ -135,35 +134,39 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs) -> Result<(), Stri
 /// Watch mode: run until interrupted or until a source fails.
 fn watch(args: &WatchArgs) -> Result<(), String> {
     let detectors = args.detection.detectors()?;
-    let (events, messages) = mpsc::channel();
+    let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
 
     if let Some(addr) = args.syslog_udp {
         let udp = SyslogUdp::bind(addr, args.allow_remote_syslog)?;
         eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
-        udp.spawn(parser(), events.clone());
+        udp.spawn(parser(), outlet.clone());
     }
     // Kept alive until watching ends: dropping it stops journalctl.
     let _journal = match args.journal {
         true => {
-            let journal = JournalFollow::start(events.clone())?;
+            let journal = JournalFollow::start(outlet.clone())?;
             eprintln!("minisiem: following journald ({})", SSHD_PROCESSES.join(", "));
             Some(journal)
         }
         false => None,
     };
 
-    let shutdown = events.clone();
-    ctrlc::set_handler(move || {
-        let _ = shutdown.send(Message::Shutdown);
-    })
-    .map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
-    drop(events);
+    let shutdown = outlet.clone();
+    ctrlc::set_handler(move || shutdown.shutdown()).map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
+    drop(outlet);
 
     let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
-    let stop = drain(&messages, &mut pipeline).map_err(|e| e.to_string());
+    let stop = drain(&inlet, &mut pipeline).map_err(|e| e.to_string());
 
     let stats = pipeline.stats();
-    eprintln!("minisiem: watch: events={} alerts={}", stats.events, stats.alerts);
+    let dropped = match inlet.dropped() {
+        0 => String::new(),
+        n => format!(" dropped={n}"),
+    };
+    eprintln!(
+        "minisiem: watch: events={} alerts={}{dropped}",
+        stats.events, stats.alerts
+    );
     match stop? {
         Stop::Interrupted => Ok(()),
         Stop::SourceFailed { source, error } => Err(format!("{source}: {error}")),

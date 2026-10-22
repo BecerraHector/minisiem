@@ -4,11 +4,10 @@ use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use super::Message;
+use super::Outlet;
 use crate::ingestion::{JournalParser, LogParser, SSHD_PROCESSES};
 
 /// Name used in messages about this source.
@@ -24,7 +23,7 @@ pub struct JournalFollow {
 
 impl JournalFollow {
     /// Starts `journalctl` and the threads reading it.
-    pub fn start(events: Sender<Message>) -> Result<Self, String> {
+    pub fn start(outlet: Outlet) -> Result<Self, String> {
         let program = env::var_os(JOURNALCTL_ENV).unwrap_or_else(|| "journalctl".into());
         let mut child = journalctl_command(program)
             .stdin(Stdio::null())
@@ -37,18 +36,18 @@ impl JournalFollow {
         let child = Arc::new(Mutex::new(child));
 
         // Relay journalctl's own messages; a permission warning is fatal.
-        let warnings = events.clone();
+        let warnings = outlet.clone();
         let relay = thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if is_permission_warning(&line) {
-                    let _ = warnings.send(Message::Failed {
-                        source: SOURCE.into(),
-                        error: format!(
+                    warnings.fail(
+                        SOURCE,
+                        format!(
                             "cannot read the system journal ({}); run as root or as a member of the \
                              'systemd-journal' group",
                             line.trim()
                         ),
-                    });
+                    );
                     return;
                 }
                 eprintln!("minisiem: journalctl: {line}");
@@ -57,7 +56,7 @@ impl JournalFollow {
 
         let exited = Arc::clone(&child);
         thread::spawn(move || {
-            let result = forward_events(BufReader::new(stdout), &events);
+            let result = forward_events(BufReader::new(stdout), &outlet);
             // stdout closed, so journalctl is gone. Let its last words reach
             // stderr before reporting, or the process may exit first.
             let _ = relay.join();
@@ -67,10 +66,7 @@ impl JournalFollow {
                 (Ok(()), Some(status)) => format!("journalctl exited ({status})"),
                 (Ok(()), None) => "journalctl exited".into(),
             };
-            let _ = events.send(Message::Failed {
-                source: SOURCE.into(),
-                error,
-            });
+            outlet.fail(SOURCE, error);
         });
 
         Ok(Self { child })
@@ -88,13 +84,12 @@ fn journalctl_command(program: OsString) -> Command {
 }
 
 /// Sends every sshd event found in `reader` until it ends.
-fn forward_events(mut reader: impl BufRead, events: &Sender<Message>) -> io::Result<()> {
+fn forward_events(mut reader: impl BufRead, outlet: &Outlet) -> io::Result<()> {
     let mut buf = Vec::new();
     while reader.read_until(b'\n', &mut buf)? > 0 {
         let line = String::from_utf8_lossy(&buf);
-        // A closed channel means the pipeline is gone: stop quietly.
         if let Some(event) = JournalParser.parse(line.trim_end())
-            && events.send(Message::Event(event)).is_err()
+            && !outlet.event(event)
         {
             return Ok(());
         }
@@ -122,7 +117,6 @@ impl Drop for JournalFollow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
 
     #[test]
     fn follows_only_new_entries_of_sshd_processes_by_trusted_field() {
@@ -149,18 +143,16 @@ mod tests {
     #[test]
     fn forwards_parsed_sshd_events_and_skips_the_rest() {
         let journal = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json")).unwrap();
-        let (tx, rx) = mpsc::channel();
+        let (outlet, inlet) = super::super::channel(100);
 
-        forward_events(journal.as_slice(), &tx).unwrap();
-        drop(tx);
+        forward_events(journal.as_slice(), &outlet).unwrap();
+        drop(outlet);
 
-        let events: Vec<_> = rx.iter().collect();
         assert_eq!(
-            events.len(),
+            inlet.events.iter().count(),
             11,
             "10 failures and 1 login; spoofed and unrelated entries skipped"
         );
-        assert!(events.iter().all(|m| matches!(m, Message::Event(_))));
     }
 
     #[test]
