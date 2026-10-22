@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 
 use super::Detector;
 use crate::alert::{Alert, Evidence, MitreTechnique, Severity};
@@ -24,6 +24,7 @@ pub struct SshBruteForce {
     threshold: usize,
     window: Duration,
     failures: HashMap<IpAddr, VecDeque<Event>>,
+    last_sweep: Option<DateTime<Utc>>,
 }
 
 impl SshBruteForce {
@@ -32,7 +33,26 @@ impl SshBruteForce {
             threshold,
             window,
             failures: HashMap::new(),
+            last_sweep: None,
         }
+    }
+
+    /// Drops IPs whose newest failure left the window, at most once per
+    /// window, so an attacker rotating through many IPs cannot grow memory
+    /// without bound.
+    fn sweep(&mut self, now: DateTime<Utc>, cutoff: DateTime<Utc>) {
+        if self.last_sweep.is_some_and(|last| now - last < self.window) {
+            return;
+        }
+        self.failures
+            .retain(|_, recent| recent.back().is_some_and(|newest| newest.timestamp >= cutoff));
+        self.last_sweep = Some(now);
+    }
+
+    /// Source IPs currently holding state.
+    #[cfg(test)]
+    fn tracked_ips(&self) -> usize {
+        self.failures.len()
     }
 
     /// Feeds one event; returns the alert if this event completes a burst.
@@ -41,11 +61,13 @@ impl SshBruteForce {
             return None;
         }
 
+        let cutoff = event.timestamp - self.window;
+        self.sweep(event.timestamp, cutoff);
+
         let recent = self.failures.entry(event.src_ip).or_default();
         recent.push_back(event.clone());
 
         // Slide the window: drop failures older than `window` before `event`.
-        let cutoff = event.timestamp - self.window;
         while recent.front().is_some_and(|old| old.timestamp < cutoff) {
             recent.pop_front();
         }
@@ -192,5 +214,18 @@ mod tests {
             .observe(&failed("203.0.113.7", "root", 5))
             .expect("second burst fires");
         assert!(matches!(second.evidence, Evidence::Burst { first_seen, .. } if first_seen == at(3)));
+    }
+
+    #[test]
+    fn forgets_source_ips_that_went_quiet() {
+        let mut rule = rule();
+        for i in 0..1000 {
+            rule.observe(&failed(&format!("10.0.{}.{}", i / 256, i % 256), "root", 0));
+        }
+        assert_eq!(rule.tracked_ips(), 1000);
+
+        rule.observe(&failed("203.0.113.7", "root", 3600));
+
+        assert_eq!(rule.tracked_ips(), 1, "only the IP seen within the window survives");
     }
 }
