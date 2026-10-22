@@ -1,0 +1,22 @@
+title: SSH login as root
+id: 5d7f1c2a-8b3e-4f6a-9c0d-1e2f3a4b5c6d
+status: experimental
+description: |
+  Detects a successful SSH login as root. Direct root logins bypass per-user
+  accountability and should be disabled (PermitRootLogin no).
+author: minisiem
+date: 2026-10-22
+tags:
+  - attack.privilege_escalation
+  - attack.t1078.003
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event_kind: successful_login
+    user: root
+  condition: selection
+falsepositives:
+  - Break-glass access by administrators on hosts that still allow root login
+level: high

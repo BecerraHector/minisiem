@@ -1,0 +1,5 @@
+title: Uses a field sshd events do not have
+detection:
+  selection:
+    CommandLine: whoami
+  condition: selection

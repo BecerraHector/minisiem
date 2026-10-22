@@ -4,3 +4,4 @@ pub mod detection;
 pub mod event;
 pub mod ingestion;
 pub mod pipeline;
+pub mod rule_loading;

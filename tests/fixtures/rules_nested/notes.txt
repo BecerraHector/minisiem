@@ -1,0 +1,1 @@
+Not a rule: files without a .yml or .yaml extension are ignored.

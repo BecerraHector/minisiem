@@ -5,7 +5,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use regex::Regex;
 
 use super::LogParser;
-use crate::event::{Event, EventKind};
+use crate::event::{Event, EventKind, LogSource};
 
 /// `<timestamp> <host> <sshd|sshd-session>[pid]: <message>`
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {
@@ -15,9 +15,8 @@ static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-static FAILED: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^Failed \S+ for (?:invalid user )?(?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap()
-});
+static FAILED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Failed \S+ for (?:invalid user )?(?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
 
 static INVALID_USER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^Invalid user (?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
@@ -75,7 +74,8 @@ fn classify(message: &str) -> Option<(EventKind, &str, IpAddr)> {
 impl LogParser for SshdParser {
     fn parse(&self, line: &str) -> Option<Event> {
         let header = HEADER.captures(line)?;
-        let (kind, user, src_ip) = classify(header.name("message")?.as_str())?;
+        let message = header.name("message")?.as_str();
+        let (kind, user, src_ip) = classify(message)?;
         let timestamp = self.parse_timestamp(
             header.name("iso").map(|m| m.as_str()),
             header.name("bsd").map(|m| m.as_str()),
@@ -88,6 +88,8 @@ impl LogParser for SshdParser {
             kind,
             user: user.to_string(),
             src_ip,
+            message: message.to_string(),
+            logsource: LogSource::new("linux", "sshd"),
         })
     }
 }
@@ -95,7 +97,6 @@ impl LogParser for SshdParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::EventKind;
     use chrono::{TimeZone, Utc};
 
     fn parser() -> SshdParser {
@@ -118,6 +119,8 @@ mod tests {
                 kind: EventKind::FailedLogin,
                 user: "root".into(),
                 src_ip: "203.0.113.7".parse().unwrap(),
+                message: "Failed password for root from 203.0.113.7 port 52211 ssh2".into(),
+                logsource: LogSource::new("linux", "sshd"),
             }
         );
     }
@@ -175,11 +178,15 @@ mod tests {
 
     #[test]
     fn parses_iso_timestamp_with_fraction_and_compact_offset() {
-        let line = "2026-10-22T10:15:32.123456+0000 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
+        let line =
+            "2026-10-22T10:15:32.123456+0000 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
 
         let event = parser().parse(line).unwrap();
 
-        assert_eq!(event.timestamp.timestamp(), Utc.with_ymd_and_hms(2026, 10, 22, 10, 15, 32).unwrap().timestamp());
+        assert_eq!(
+            event.timestamp.timestamp(),
+            Utc.with_ymd_and_hms(2026, 10, 22, 10, 15, 32).unwrap().timestamp()
+        );
     }
 
     #[test]

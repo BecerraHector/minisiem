@@ -6,4 +6,7 @@ edition = "2024"
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.7", features = ["derive"] }
+ipnet = "2.12.2"
 regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde-saphyr = "2.0.0"

@@ -1,0 +1,5 @@
+title: Nested rule
+detection:
+  selection:
+    user: nobody-matches-this
+  condition: selection
