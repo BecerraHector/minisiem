@@ -30,9 +30,9 @@ struct Args {
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
     window: u64,
 
-    /// Directory of Sigma rules (*.yml, *.yaml, searched recursively) to run
-    /// in addition to the built-in brute force detection. Any invalid rule
-    /// aborts startup.
+    /// Directory of Sigma detection and correlation rules (*.yml, *.yaml,
+    /// searched recursively) to run in addition to the built-in brute force
+    /// detection. Any invalid rule aborts startup.
     #[arg(long, value_name = "DIR")]
     rules: Option<PathBuf>,
 }

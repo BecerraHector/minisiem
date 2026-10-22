@@ -26,7 +26,8 @@ Branch: `feat/sigma-correlation` · Delivery: single PR, work-unit commits (fore
 | T3 | S8, S9 | inline | done | RED: 11 failing; GREEN: 98 unit (dead_code warnings until T4) |
 | T4 | S5, S7, S8 | inline | done | RED: 8 failing; GREEN: 103 unit + 9 CLI; `SigmaDetector` replaced by `SigmaEngine`, loader returns `RuleSet` |
 | T5 | S9 | inline | done | RED: 1001 tracked IPs instead of 1; GREEN: 104 unit + 9 CLI |
-| T6 | S11 | inline | pending | |
+| T6 | S11 | inline | done | RED: shipped-rules CLI test (6 vs 8 alerts); GREEN: 104 unit + 11 CLI |
+| T7 | S10 | inline | done | `60abd54` fix: chained alerts span the whole incident (RED: first_seen at(3) instead of at(1)) |
 
 - T1: `Detector` returns all alerts for an event; `Evidence::Correlation` and its console format.
 - T2: rule model: `name`, multi-document files, correlation parsing and load-time validation.
@@ -41,4 +42,5 @@ Routes: all inline (sequential tasks, no writer trigger).
 
 - **L1** (2026-10-22) User: "sigamos con la fase 3"
 - **L2** Spec read from SigmaHQ `sigma-correlation-rules-specification.md` (v2.1.0): types, `rules` by name or id, chaining, `generate` default false, multi-document YAML, timespan units `s|m|h|d`, condition operators `gt|gte|lt|lte|eq|neq`.
+- **L4** Defect found while writing T6 rules: chained hits carried only the inner correlation's `last_seen`, so the outer alert started at the end of the burst. Fixed by giving `Hit` its own `first_seen` (T7). Fixture with shipped rules: 8 alerts, including `[CRITICAL] SSH login after brute force ... events=11` starting at the first failure.
 - **L3** Repo is now `BecerraHector/minisiem` (phase 2 merged as PR #1, `0632afc`). Merged local branch `feat/minisiem-sigma-rules` deleted.

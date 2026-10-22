@@ -1,0 +1,36 @@
+title: SSH invalid user
+name: ssh_invalid_user
+id: 4f5a6b7c-8d9e-4f0a-9b1c-3d4e5f6a7b8c
+description: Building block for the correlation below; does not alert on its own.
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event_kind: invalid_user
+  condition: selection
+---
+title: SSH user enumeration
+id: 5a6b7c8d-9e0f-4a1b-8c2d-4e5f6a7b8c9d
+status: experimental
+description: |
+  One source tries several account names that do not exist on the host,
+  a scanner working through a username wordlist.
+author: minisiem
+date: 2026-10-22
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+correlation:
+  type: value_count
+  rules:
+    - ssh_invalid_user
+  group-by:
+    - src_ip
+  timespan: 10m
+  condition:
+    field: user
+    gte: 3
+falsepositives:
+  - Misconfigured automation trying several service accounts
+level: medium

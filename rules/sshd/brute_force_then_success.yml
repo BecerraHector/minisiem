@@ -1,0 +1,62 @@
+title: SSH failed login
+name: ssh_failed_login
+id: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e
+description: Building block for the correlations below; does not alert on its own.
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event_kind: failed_login
+  condition: selection
+---
+title: SSH password guessing
+name: ssh_password_guessing
+id: 1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f
+description: Ten or more failed logins from one source within five minutes.
+correlation:
+  type: event_count
+  rules:
+    - ssh_failed_login
+  group-by:
+    - src_ip
+  timespan: 5m
+  condition:
+    gte: 10
+---
+title: SSH successful login
+name: ssh_successful_login
+id: 2d3e4f5a-6b7c-4d8e-9f0a-1b2c3d4e5f6a
+description: Building block for the correlation below; does not alert on its own.
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event_kind: successful_login
+  condition: selection
+---
+title: SSH login after brute force
+id: 3e4f5a6b-7c8d-4e9f-8a0b-2c3d4e5f6a7b
+status: experimental
+description: |
+  A source that was guessing passwords logs in successfully shortly after:
+  the attack most likely worked. Treat the account and host as compromised.
+author: minisiem
+date: 2026-10-22
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+  - attack.initial_access
+  - attack.t1078
+correlation:
+  type: temporal_ordered
+  rules:
+    - ssh_password_guessing
+    - ssh_successful_login
+  group-by:
+    - src_ip
+  timespan: 15m
+falsepositives:
+  - A user who forgot their password and finally typed it right (rarely ten times in five minutes)
+level: critical
