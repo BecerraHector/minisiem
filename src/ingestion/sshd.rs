@@ -9,7 +9,7 @@ use crate::event::{Event, EventKind, LogSource};
 
 /// OpenSSH server processes. Since OpenSSH 9.8 per-connection messages come
 /// from `sshd-session`; 10.0 split authentication into `sshd-auth`.
-pub(super) const SSHD_PROCESSES: [&str; 3] = ["sshd", "sshd-session", "sshd-auth"];
+pub const SSHD_PROCESSES: [&str; 3] = ["sshd", "sshd-session", "sshd-auth"];
 
 /// `<timestamp> <host> <sshd|sshd-session|sshd-auth>[pid]: <message>`
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {

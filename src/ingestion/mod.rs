@@ -8,7 +8,7 @@ mod syslog_net;
 
 pub use auto::AutoParser;
 pub use journal::JournalParser;
-pub use sshd::SshdParser;
+pub use sshd::{SSHD_PROCESSES, SshdParser};
 
 use crate::event::Event;
 

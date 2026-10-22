@@ -23,7 +23,7 @@ Branch: `feat/live-sources` · Delivery: single PR, work-unit commits (forecast 
 | T3 | S2, S5 | inline | done | RED: 5 failing; GREEN: 118 unit + 12 CLI |
 | T4 | S4 | inline | done | refactor only (shared `DetectionArgs`, `analyze`); the `watch` subcommand lands with T5 so no commit ships a stub. GREEN: 118 unit + 12 CLI unchanged |
 | T5 | S4, S5, S6 | inline | done | RED: 9 unit + 3 CLI; GREEN: 127 unit + 15 CLI; UDP watch test stable 10/10 |
-| T6 | S3, S4, S6, S8 | inline | pending | |
+| T6 | S3, S4, S6, S8 | inline | done | RED: 3 unit; GREEN: 130 unit + 18 CLI; watch tests 10/10, no orphan journalctl |
 
 - T1: `Pipeline` struct usable event by event; console sink flushes per alert.
 - T2: shared sshd message classification; journald JSON parser; per-line format detection in batch mode.
@@ -38,5 +38,6 @@ Routes: all inline (sequential tasks, no writer trigger).
 
 - **L1** (2026-10-22) User: "arranquemos con la 4a"
 - **L2** Environment: OpenSSH 10.6 (per-connection logs come from `sshd-session`; `sshd-auth` exists since 10.0 and is accepted defensively), systemd 262. A real journal entry showed `SYSLOG_IDENTIFIER` differing from `_COMM`: only underscore fields are set by journald. Crates: `serde_json` 1.0, `ctrlc` 3.5.
+- **L5** T6: `MINISIEM_JOURNALCTL` overrides the `journalctl` binary so CLI tests run fake scripts (follow, exit, no permission). The reader thread joins the stderr relay before reporting a stopped source, so journalctl's last error is always printed. Orphan check: `pgrep -f "sleep 600"` matched the checking shell itself; `pgrep -x sleep` showed no leftover processes.
 - **L4** T2: the syslog header regex now also accepts `sshd-auth`, matching the journald process list. The journald fixture includes 12 failures spoofed with `logger -t sshd` from another IP; they produce no events.
 - **L3** Decisions: threads and `std::sync::mpsc` instead of an async runtime (two sources, one consumer, detectors stay single-threaded); file following is left to `tail -F` (rotation-safe) instead of reimplementing it.

@@ -94,6 +94,76 @@ fn watch_refuses_to_listen_beyond_loopback_without_opt_in() {
     );
 }
 
+/// Starts `minisiem watch --journal` with a fake `journalctl` script.
+fn watch_journal(fake: &str) -> Child {
+    let script = format!("{}/tests/fixtures/fake-journalctl/{fake}", env!("CARGO_MANIFEST_DIR"));
+    Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--journal"])
+        .env("MINISIEM_JOURNALCTL", script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn watch_follows_journald_and_stops_cleanly_on_interrupt() {
+    let mut child = watch_journal("follow.sh");
+    let stdout = lines_of(child.stdout.take().unwrap());
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(
+        next_line(&stderr),
+        "minisiem: following journald (sshd, sshd-session, sshd-auth)"
+    );
+    let alert = next_line(&stdout);
+    assert!(
+        alert
+            .starts_with("[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=10"),
+        "alert: {alert}"
+    );
+
+    interrupt(&child);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert_eq!(next_line(&stderr), "minisiem: watch: events=11 alerts=1");
+}
+
+#[test]
+fn watch_exits_with_an_error_when_journalctl_stops() {
+    let mut child = watch_journal("exits.sh");
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    let lines: Vec<String> = stderr.iter().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("minisiem: journald: journalctl exited")),
+        "stderr: {lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("Failed to iterate through journal: Bad message")),
+        "journalctl's own error is relayed: {lines:#?}"
+    );
+}
+
+#[test]
+fn watch_exits_with_an_error_without_permission_to_read_the_journal() {
+    let mut child = watch_journal("no-permission.sh");
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    let lines: Vec<String> = stderr.iter().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("minisiem: journald: cannot read the system journal")),
+        "stderr: {lines:#?}"
+    );
+}
+
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/auth.log");
 const BRUTE_FORCE_ALERT: &str = "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 \
                                  failures=10 users=admin,oracle,root,test,ubuntu";

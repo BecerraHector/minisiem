@@ -11,10 +11,10 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
 use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
-use minisiem::ingestion::AutoParser;
+use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
 use minisiem::pipeline::Pipeline;
 use minisiem::rule_loading;
-use minisiem::sources::{Message, Stop, SyslogUdp, drain};
+use minisiem::sources::{JournalFollow, Message, Stop, SyslogUdp, drain};
 
 /// Detect attacks in sshd logs.
 ///
@@ -142,6 +142,15 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
         udp.spawn(parser(), events.clone());
     }
+    // Kept alive until watching ends: dropping it stops journalctl.
+    let _journal = match args.journal {
+        true => {
+            let journal = JournalFollow::start(events.clone())?;
+            eprintln!("minisiem: following journald ({})", SSHD_PROCESSES.join(", "));
+            Some(journal)
+        }
+        false => None,
+    };
 
     let shutdown = events.clone();
     ctrlc::set_handler(move || {

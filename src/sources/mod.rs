@@ -2,8 +2,10 @@
 //! thread and sends what it reads through a channel; the pipeline consumes
 //! the channel on a single thread, so detectors never need locks.
 
+mod journal;
 mod syslog_udp;
 
+pub use journal::{JOURNALCTL_ENV, JournalFollow};
 pub use syslog_udp::{SyslogUdp, event_from_datagram};
 
 use std::io;
