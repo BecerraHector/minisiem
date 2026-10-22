@@ -74,7 +74,8 @@ impl CorrelationState {
         Some(fired)
     }
 
-    /// Groups currently holding state (for tests and observability).
+    /// Groups currently holding state.
+    #[cfg(test)]
     pub fn group_count(&self) -> usize {
         self.groups.len()
     }

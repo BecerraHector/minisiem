@@ -7,7 +7,7 @@ use chrono::{Datelike, Duration, Local, Offset};
 use clap::Parser;
 
 use minisiem::alerting::ConsoleSink;
-use minisiem::detection::sigma::SigmaDetector;
+use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::SshdParser;
 use minisiem::{pipeline, rule_loading};
@@ -54,12 +54,12 @@ fn main() -> ExitCode {
     if let Some(dir) = &args.rules {
         match rule_loading::load_dir(dir) {
             Ok(rules) => {
-                eprintln!("minisiem: loaded {} sigma rules from {}", rules.len(), dir.display());
-                detectors.extend(
-                    rules
-                        .into_iter()
-                        .map(|rule| Box::new(SigmaDetector::new(rule)) as Box<dyn Detector>),
+                eprintln!(
+                    "minisiem: loaded {} sigma rules from {}",
+                    rules.detections.len() + rules.correlations.len(),
+                    dir.display()
                 );
+                detectors.push(Box::new(SigmaEngine::new(rules)));
             }
             Err(err) => {
                 eprintln!("minisiem: {err}");
