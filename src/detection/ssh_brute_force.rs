@@ -34,10 +34,9 @@ impl SshBruteForce {
             failures: HashMap::new(),
         }
     }
-}
 
-impl Detector for SshBruteForce {
-    fn evaluate(&mut self, event: &Event) -> Option<Alert> {
+    /// Feeds one event; returns the alert if this event completes a burst.
+    pub fn observe(&mut self, event: &Event) -> Option<Alert> {
         if event.kind != EventKind::FailedLogin {
             return None;
         }
@@ -77,6 +76,12 @@ impl Detector for SshBruteForce {
     }
 }
 
+impl Detector for SshBruteForce {
+    fn evaluate(&mut self, event: &Event) -> Vec<Alert> {
+        self.observe(event).into_iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,11 +116,11 @@ mod tests {
     #[test]
     fn fires_when_threshold_is_reached_within_window() {
         let mut rule = rule();
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 0)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "admin", 30)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 0)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "admin", 30)), None);
 
         let alert = rule
-            .evaluate(&failed("203.0.113.7", "root", 60))
+            .observe(&failed("203.0.113.7", "root", 60))
             .expect("third failure inside the window must fire");
 
         assert_eq!(alert.rule_id, "ssh-brute-force");
@@ -137,25 +142,25 @@ mod tests {
     #[test]
     fn does_not_fire_below_threshold() {
         let mut rule = rule();
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 0)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 10)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 0)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 10)), None);
     }
 
     #[test]
     fn failures_older_than_window_are_forgotten() {
         let mut rule = rule();
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 0)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 61)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 62)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 0)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 61)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 62)), None);
     }
 
     #[test]
     fn counts_each_source_ip_separately() {
         let mut rule = rule();
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 0)), None);
-        assert_eq!(rule.evaluate(&failed("198.51.100.23", "root", 1)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 2)), None);
-        assert_eq!(rule.evaluate(&failed("198.51.100.23", "root", 3)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 0)), None);
+        assert_eq!(rule.observe(&failed("198.51.100.23", "root", 1)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 2)), None);
+        assert_eq!(rule.observe(&failed("198.51.100.23", "root", 3)), None);
     }
 
     #[test]
@@ -163,11 +168,11 @@ mod tests {
         let mut rule = rule();
         for secs in 0..5 {
             assert_eq!(
-                rule.evaluate(&event(EventKind::InvalidUser, "203.0.113.7", "x", secs)),
+                rule.observe(&event(EventKind::InvalidUser, "203.0.113.7", "x", secs)),
                 None
             );
             assert_eq!(
-                rule.evaluate(&event(EventKind::SuccessfulLogin, "203.0.113.7", "x", secs)),
+                rule.observe(&event(EventKind::SuccessfulLogin, "203.0.113.7", "x", secs)),
                 None
             );
         }
@@ -177,14 +182,14 @@ mod tests {
     fn resets_after_firing_so_next_alert_needs_a_new_burst() {
         let mut rule = rule();
         for secs in 0..2 {
-            rule.evaluate(&failed("203.0.113.7", "root", secs));
+            rule.observe(&failed("203.0.113.7", "root", secs));
         }
-        assert!(rule.evaluate(&failed("203.0.113.7", "root", 2)).is_some());
+        assert!(rule.observe(&failed("203.0.113.7", "root", 2)).is_some());
 
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 3)), None);
-        assert_eq!(rule.evaluate(&failed("203.0.113.7", "root", 4)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 3)), None);
+        assert_eq!(rule.observe(&failed("203.0.113.7", "root", 4)), None);
         let second = rule
-            .evaluate(&failed("203.0.113.7", "root", 5))
+            .observe(&failed("203.0.113.7", "root", 5))
             .expect("second burst fires");
         assert!(matches!(second.evidence, Evidence::Burst { first_seen, .. } if first_seen == at(3)));
     }

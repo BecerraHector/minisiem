@@ -15,12 +15,12 @@ impl SigmaDetector {
 }
 
 impl Detector for SigmaDetector {
-    fn evaluate(&mut self, event: &Event) -> Option<Alert> {
+    fn evaluate(&mut self, event: &Event) -> Vec<Alert> {
         if !self.rule.matches(event) {
-            return None;
+            return vec![];
         }
 
-        Some(Alert {
+        vec![Alert {
             rule_id: self.rule.id.clone().unwrap_or_else(|| self.rule.title.clone()),
             title: self.rule.title.clone(),
             severity: self.rule.severity,
@@ -28,7 +28,7 @@ impl Detector for SigmaDetector {
             src_ip: event.src_ip,
             host: event.host.clone(),
             evidence: Evidence::Event(event.clone()),
-        })
+        }]
     }
 }
 
@@ -64,11 +64,11 @@ mod tests {
     fn emits_an_alert_carrying_rule_metadata_and_the_event() {
         let event = login("root");
 
-        let alert = detector("id: rule-1\n").evaluate(&event).expect("rule should fire");
+        let alerts = detector("id: rule-1\n").evaluate(&event);
 
         assert_eq!(
-            alert,
-            Alert {
+            alerts,
+            vec![Alert {
                 rule_id: "rule-1".into(),
                 title: "SSH login as root".into(),
                 severity: Severity::High,
@@ -79,19 +79,19 @@ mod tests {
                 src_ip: event.src_ip,
                 host: "srv01".into(),
                 evidence: Evidence::Event(event),
-            }
+            }]
         );
     }
 
     #[test]
     fn rule_id_falls_back_to_title() {
-        let alert = detector("").evaluate(&login("root")).unwrap();
+        let alerts = detector("").evaluate(&login("root"));
 
-        assert_eq!(alert.rule_id, "SSH login as root");
+        assert_eq!(alerts[0].rule_id, "SSH login as root");
     }
 
     #[test]
     fn stays_silent_when_the_rule_does_not_match() {
-        assert_eq!(detector("").evaluate(&login("hector")), None);
+        assert!(detector("").evaluate(&login("hector")).is_empty());
     }
 }

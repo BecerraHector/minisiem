@@ -48,6 +48,16 @@ pub enum Evidence {
     },
     /// The single event that matched a stateless rule.
     Event(Event),
+    /// A correlation rule fired for one group of events.
+    Correlation {
+        /// `group-by` field names and their shared values, in rule order.
+        group: Vec<(String, String)>,
+        event_count: usize,
+        first_seen: DateTime<Utc>,
+        last_seen: DateTime<Utc>,
+        /// Distinct values counted by a `value_count` correlation, sorted.
+        values: Vec<String>,
+    },
 }
 
 /// The result of a detection rule firing.

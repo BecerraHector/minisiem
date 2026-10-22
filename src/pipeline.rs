@@ -32,7 +32,7 @@ pub fn run<R: BufRead>(
         if let Some(event) = parser.parse(line.trim_end_matches(['\n', '\r'])) {
             stats.events += 1;
             for detector in detectors.iter_mut() {
-                if let Some(alert) = detector.evaluate(&event) {
+                for alert in detector.evaluate(&event) {
                     stats.alerts += 1;
                     sink.emit(&alert)?;
                 }
@@ -89,5 +89,37 @@ mod tests {
         );
         assert_eq!(sink.0.len(), 1);
         assert!(matches!(sink.0[0].evidence, Evidence::Burst { event_count: 2, .. }));
+    }
+
+    /// Fires twice for every event, like a rule plus a correlation over it.
+    struct TwoAlerts;
+
+    impl Detector for TwoAlerts {
+        fn evaluate(&mut self, event: &crate::event::Event) -> Vec<Alert> {
+            let alert = |title: &str| Alert {
+                rule_id: title.into(),
+                title: title.into(),
+                severity: crate::alert::Severity::Low,
+                techniques: vec![],
+                src_ip: event.src_ip,
+                host: event.host.clone(),
+                evidence: Evidence::Event(event.clone()),
+            };
+            vec![alert("first"), alert("second")]
+        }
+    }
+
+    #[test]
+    fn emits_every_alert_a_detector_returns_in_order() {
+        let input = b"Oct 22 10:00:00 srv01 sshd[2]: Failed password for root from 203.0.113.7 port 1 ssh2\n";
+        let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
+        let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(TwoAlerts)];
+        let mut sink = CollectSink::default();
+
+        let stats = run(input.as_slice(), &parser, &mut detectors, &mut sink).unwrap();
+
+        assert_eq!(stats.alerts, 2);
+        let titles: Vec<_> = sink.0.iter().map(|a| a.title.as_str()).collect();
+        assert_eq!(titles, ["first", "second"]);
     }
 }
