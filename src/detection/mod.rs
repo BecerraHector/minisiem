@@ -1,6 +1,7 @@
 //! Detection rules (domain). Rules consume normalized events and know
 //! nothing about where those events came from.
 
+pub mod sigma;
 mod ssh_brute_force;
 
 pub use ssh_brute_force::SshBruteForce;
