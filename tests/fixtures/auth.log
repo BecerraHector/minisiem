@@ -1,0 +1,23 @@
+Oct 22 09:00:01 srv01 sshd[901]: Accepted publickey for hector from 192.168.1.10 port 40022 ssh2: ED25519 SHA256:Qm9ndXNLZXlGb3JUZXN0cw
+Oct 22 09:00:01 srv01 sshd[901]: pam_unix(sshd:session): session opened for user hector(uid=1000) by (uid=0)
+Oct 22 09:17:01 srv01 CRON[1001]: pam_unix(cron:session): session opened for user root(uid=0) by (uid=0)
+Oct 22 09:20:00 srv01 sshd[1100]: Failed password for root from 198.51.100.23 port 33001 ssh2
+Oct 22 10:15:00 srv01 sshd[2000]: Failed password for root from 203.0.113.7 port 52000 ssh2
+Oct 22 10:15:09 srv01 sshd[2001]: Failed password for root from 203.0.113.7 port 52001 ssh2
+Oct 22 10:15:18 srv01 sshd[2002]: Failed password for admin from 203.0.113.7 port 52002 ssh2
+Oct 22 10:15:27 srv01 sshd[2003]: Invalid user oracle from 203.0.113.7 port 52003
+Oct 22 10:15:27 srv01 sshd[2003]: Failed password for invalid user oracle from 203.0.113.7 port 52003 ssh2
+Oct 22 10:15:36 srv01 sshd[2004]: Failed password for root from 203.0.113.7 port 52004 ssh2
+Oct 22 10:15:45 srv01 sshd[2005]: Invalid user test from 203.0.113.7 port 52005
+Oct 22 10:15:45 srv01 sshd[2005]: Failed password for invalid user test from 203.0.113.7 port 52005 ssh2
+Oct 22 10:15:54 srv01 sshd[2006]: Failed password for root from 203.0.113.7 port 52006 ssh2
+Oct 22 10:16:03 srv01 sshd[2007]: Invalid user ubuntu from 203.0.113.7 port 52007
+Oct 22 10:16:03 srv01 sshd[2007]: Failed password for invalid user ubuntu from 203.0.113.7 port 52007 ssh2
+Oct 22 10:16:12 srv01 sshd[2008]: Failed password for root from 203.0.113.7 port 52008 ssh2
+Oct 22 10:16:21 srv01 sshd[2009]: Failed password for admin from 203.0.113.7 port 52009 ssh2
+Oct 22 10:16:30 srv01 sshd[2010]: Failed password for root from 203.0.113.7 port 52010 ssh2
+Oct 22 10:16:39 srv01 sshd[2011]: Failed password for root from 203.0.113.7 port 52011 ssh2
+Oct 22 10:17:05 srv01 sshd[2100]: Accepted password for root from 203.0.113.7 port 52100 ssh2
+Oct 22 10:20:00 srv01 sshd[1200]: Failed password for root from 198.51.100.23 port 33002 ssh2
+Oct 22 11:20:00 srv01 sshd[1300]: Failed password for root from 198.51.100.23 port 33003 ssh2
+Oct 22 11:17:01 srv01 CRON[1002]: pam_unix(cron:session): session closed for user root

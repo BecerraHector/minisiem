@@ -1,0 +1,74 @@
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use chrono::{Datelike, Duration, Local, Offset};
+use clap::Parser;
+
+use minisiem::alerting::ConsoleSink;
+use minisiem::detection::{Detector, SshBruteForce};
+use minisiem::ingestion::SshdParser;
+use minisiem::pipeline;
+
+/// Detect SSH brute force attacks in sshd logs.
+///
+/// Reads syslog-style lines (/var/log/auth.log, /var/log/secure or
+/// `journalctl -u sshd -o short-iso`) and prints one line per alert.
+#[derive(Parser)]
+#[command(version)]
+struct Args {
+    /// Log file to analyze. Reads standard input when omitted or "-".
+    file: Option<PathBuf>,
+
+    /// Failed logins from one IP needed to raise an alert.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..))]
+    threshold: u64,
+
+    /// Sliding window, in seconds, in which failures are counted.
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
+    window: u64,
+}
+
+fn open_input(file: Option<&PathBuf>) -> io::Result<Box<dyn BufRead>> {
+    match file {
+        Some(path) if path.as_os_str() != "-" => Ok(Box::new(BufReader::new(File::open(path)?))),
+        _ => Ok(Box::new(io::stdin().lock())),
+    }
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+    let source = args.file.as_ref().map_or("<stdin>".into(), |p| p.display().to_string());
+
+    let input = match open_input(args.file.as_ref()) {
+        Ok(input) => input,
+        Err(err) => {
+            eprintln!("minisiem: {source}: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // Syslog timestamps lack year and timezone: assume the current local ones.
+    let now = Local::now();
+    let parser = SshdParser::new(now.year(), now.offset().fix());
+    let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(SshBruteForce::new(
+        args.threshold as usize,
+        Duration::seconds(args.window as i64),
+    ))];
+    let mut sink = ConsoleSink::new(io::stdout().lock());
+
+    match pipeline::run(input, &parser, &mut detectors, &mut sink) {
+        Ok(stats) => {
+            eprintln!(
+                "minisiem: {source}: lines={} events={} alerts={}",
+                stats.lines, stats.events, stats.alerts
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("minisiem: {source}: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
