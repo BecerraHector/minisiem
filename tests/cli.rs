@@ -71,6 +71,64 @@ fn fails_with_clear_message_when_file_is_missing() {
 }
 
 #[test]
+fn shipped_sigma_rules_add_alerts_in_event_order() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/rules");
+
+    let output = minisiem(&["--rules", rules, FIXTURE]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let alerts: Vec<_> = stdout(&output).lines().map(str::to_owned).collect();
+    let expected_prefixes = [
+        "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=oracle event_kind=invalid_user",
+        "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=test event_kind=invalid_user",
+        "[LOW] SSH probe for default account (T1110.001) src=203.0.113.7 host=srv01 user=ubuntu event_kind=invalid_user",
+        BRUTE_FORCE_ALERT,
+        "[MEDIUM] SSH login from public IP (T1078, T1021.004) src=203.0.113.7 host=srv01 user=root \
+         event_kind=successful_login",
+        "[HIGH] SSH login as root (T1078.003) src=203.0.113.7 host=srv01 user=root event_kind=successful_login",
+    ];
+    assert_eq!(alerts.len(), expected_prefixes.len(), "alerts: {alerts:#?}");
+    for (alert, prefix) in alerts.iter().zip(expected_prefixes) {
+        assert!(alert.starts_with(prefix), "\nalert:  {alert}\nprefix: {prefix}");
+    }
+    assert!(alerts[5].ends_with("message=\"Accepted password for root from 203.0.113.7 port 52100 ssh2\""));
+    assert!(stderr(&output).contains(&format!("minisiem: loaded 3 sigma rules from {rules}")));
+    assert!(stderr(&output).contains("alerts=6"));
+}
+
+#[test]
+fn loads_rules_recursively_and_ignores_other_files() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rules_nested");
+
+    let output = minisiem(&["--rules", rules, FIXTURE]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).contains("loaded 1 sigma rules"), "stderr: {}", stderr(&output));
+}
+
+#[test]
+fn refuses_to_start_with_an_invalid_rule() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rules_invalid");
+
+    let output = minisiem(&["--rules", rules, FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).is_empty());
+    let message = stderr(&output);
+    assert!(message.contains("rules_invalid/bad.yml"), "stderr: {message}");
+    assert!(message.contains("unknown field 'CommandLine'"), "stderr: {message}");
+}
+
+#[test]
+fn fails_with_clear_message_when_rules_dir_is_missing() {
+    let output = minisiem(&["--rules", "/nonexistent/rules", FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).starts_with("minisiem: /nonexistent/rules:"), "stderr: {}", stderr(&output));
+}
+
+#[test]
 fn rejects_zero_threshold() {
     let output = minisiem(&["--threshold", "0", FIXTURE]);
 

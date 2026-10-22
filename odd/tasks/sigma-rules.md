@@ -23,7 +23,8 @@ Branch: `feat/minisiem-sigma-rules` · Delivery: single PR, work-unit commits (f
 | T2 | S6 | inline | done | RED: 14 failing; GREEN: 34 unit |
 | T3 | S3, S4, S5 | inline | done | RED: 16 failing; GREEN: 50 unit |
 | T4 | S4, S5, S7, S8 | inline | done | RED: 14 failing; GREEN: 64 unit + 5 CLI |
-| T5 | S2, S8, S9 | inline | pending | |
+| T5 | S2, S8, S9 | inline | done | RED: 4 failing CLI; GREEN: 64 unit + 9 CLI |
+| T6 | — | inline | done | `rustfmt.toml` (max_width 120) + `cargo fmt`, separate style commit |
 
 - T1: generalize domain (`Event` gets raw message and logsource, `Alert` owns strings, `Severity::Informational`) without changing phase 1 output.
 - T2: condition expression parser (recursive descent).
@@ -41,3 +42,4 @@ Routes: all inline (no writer trigger: tasks are sequential and the user is lear
 - **L4** Native review blocked: `gentle-ai review assess` is unassessable because the untracked nested repo `rust-ejercicios/` sits inside this repository. Fix is the user's call (ignore it or move it). Pending reviews from base `ff4b0fd`.
 - **L5** T2: recursive-descent condition parser plus a linear-backtrack glob matcher (`*`, `?`, escapes) shared with value matching.
 - **L6** T3: `SigmaRule::from_yaml` validates everything at load time (fields against `Event::FIELDS`, modifiers, regex with a 1 MiB size limit, CIDR, condition references). Directory walking moves to T5 with the CLI.
+- **L7** T5: directory loading lives in the `rule_loading` adapter (filesystem I/O stays out of the domain); symlinked directories are skipped to avoid loops. Fixture run with shipped rules: 6 alerts (3 default-account probes, brute force, public-IP login, root login).

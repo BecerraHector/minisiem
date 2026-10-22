@@ -7,9 +7,10 @@ use chrono::{Datelike, Duration, Local, Offset};
 use clap::Parser;
 
 use minisiem::alerting::ConsoleSink;
+use minisiem::detection::sigma::SigmaDetector;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::SshdParser;
-use minisiem::pipeline;
+use minisiem::{pipeline, rule_loading};
 
 /// Detect SSH brute force attacks in sshd logs.
 ///
@@ -28,6 +29,12 @@ struct Args {
     /// Sliding window, in seconds, in which failures are counted.
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
     window: u64,
+
+    /// Directory of Sigma rules (*.yml, *.yaml, searched recursively) to run
+    /// in addition to the built-in brute force detection. Any invalid rule
+    /// aborts startup.
+    #[arg(long, value_name = "DIR")]
+    rules: Option<PathBuf>,
 }
 
 fn open_input(file: Option<&PathBuf>) -> io::Result<Box<dyn BufRead>> {
@@ -39,6 +46,24 @@ fn open_input(file: Option<&PathBuf>) -> io::Result<Box<dyn BufRead>> {
 
 fn main() -> ExitCode {
     let args = Args::parse();
+
+    let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(SshBruteForce::new(
+        args.threshold as usize,
+        Duration::seconds(args.window as i64),
+    ))];
+    if let Some(dir) = &args.rules {
+        match rule_loading::load_dir(dir) {
+            Ok(rules) => {
+                eprintln!("minisiem: loaded {} sigma rules from {}", rules.len(), dir.display());
+                detectors.extend(rules.into_iter().map(|rule| Box::new(SigmaDetector::new(rule)) as Box<dyn Detector>));
+            }
+            Err(err) => {
+                eprintln!("minisiem: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     let source = args.file.as_ref().map_or("<stdin>".into(), |p| p.display().to_string());
 
     let input = match open_input(args.file.as_ref()) {
@@ -52,10 +77,6 @@ fn main() -> ExitCode {
     // Syslog timestamps lack year and timezone: assume the current local ones.
     let now = Local::now();
     let parser = SshdParser::new(now.year(), now.offset().fix());
-    let mut detectors: Vec<Box<dyn Detector>> = vec![Box::new(SshBruteForce::new(
-        args.threshold as usize,
-        Duration::seconds(args.window as i64),
-    ))];
     let mut sink = ConsoleSink::new(io::stdout().lock());
 
     match pipeline::run(input, &parser, &mut detectors, &mut sink) {

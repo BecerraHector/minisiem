@@ -1,0 +1,33 @@
+title: SSH probe for default account
+id: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+status: experimental
+description: |
+  Detects login attempts for well-known default or service account names
+  that do not exist on the host, a typical sign of automated scanners
+  working through a wordlist.
+author: minisiem
+date: 2026-10-22
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    event_kind: invalid_user
+    user:
+      - admin
+      - ftp
+      - git
+      - guest
+      - oracle
+      - pi
+      - postgres
+      - test
+      - ubuntu
+      - user
+  condition: selection
+falsepositives:
+  - Users mistyping their account name
+level: low
