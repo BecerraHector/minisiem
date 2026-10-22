@@ -44,14 +44,14 @@ impl<W: Write> ConsoleSink<W> {
             } => writeln!(
                 self.out,
                 " failures={event_count} users={} first_seen={} last_seen={}",
-                escape_control(&users.join(",")),
+                field_list(users),
                 first_seen.to_rfc3339(),
                 last_seen.to_rfc3339(),
             ),
             Evidence::Event(event) => writeln!(
                 self.out,
                 " user={} event_kind={} time={} message={:?}",
-                escape_control(&event.user),
+                field_value(&event.user),
                 event.kind.as_str(),
                 event.timestamp.to_rfc3339(),
                 // Debug formatting quotes the message and escapes control characters.
@@ -65,7 +65,7 @@ impl<W: Write> ConsoleSink<W> {
                 values,
             } => {
                 for (field, value) in group {
-                    write!(self.out, " group.{field}={}", escape_control(value))?;
+                    write!(self.out, " group.{field}={}", field_value(value))?;
                 }
                 write!(
                     self.out,
@@ -74,7 +74,7 @@ impl<W: Write> ConsoleSink<W> {
                     last_seen.to_rfc3339()
                 )?;
                 if !values.is_empty() {
-                    write!(self.out, " values={}", escape_control(&values.join(",")))?;
+                    write!(self.out, " values={}", field_list(values))?;
                 }
                 writeln!(self.out)
             }
@@ -96,6 +96,27 @@ fn techniques(alert: &Alert) -> String {
         })
         .collect();
     format!(" ({})", list.join(", "))
+}
+
+/// An attacker-controlled field value. Values with spaces, `=`, `,` or `"`
+/// (e.g. an invalid username such as `x src=9.9.9.9`) are quoted so they
+/// cannot pass for other fields or list items; the rest is printed as is.
+fn field_value(value: &str) -> String {
+    if value.contains(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | '"')) {
+        // Debug formatting quotes and escapes quotes and control characters.
+        format!("{value:?}")
+    } else {
+        escape_control(value)
+    }
+}
+
+/// A comma-separated list of attacker-controlled values.
+fn field_list<S: AsRef<str>>(values: &[S]) -> String {
+    values
+        .iter()
+        .map(|value| field_value(value.as_ref()))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Log fields can be attacker-controlled: escape control characters so they
@@ -302,5 +323,23 @@ mod tests {
         assert!(event.contains("message=\"Invalid user \\u{1b}[2J from\""), "{event}");
         assert!(correlation.contains("group.user=\\u{1b}[2J "), "{correlation}");
         assert!(correlation.contains("values=\\u{1b}[2J\n"), "{correlation}");
+    }
+
+    #[test]
+    fn quotes_attacker_controlled_values_that_could_fake_other_fields() {
+        // sshd logs invalid usernames verbatim, spaces included: unquoted, this
+        // one would add a second `src=` to the line.
+        let fake = "x src=9.9.9.9 host=evil";
+        let burst = render(&burst_alert(vec!["admin".into(), fake.into()]));
+        let event = render(&event_alert(vec![], fake, "Invalid user"));
+        let correlation = render(&correlation_alert(vec![("user", fake)], vec!["root", "a,b"]));
+
+        assert!(burst.contains(r#" users=admin,"x src=9.9.9.9 host=evil" "#), "{burst}");
+        assert!(event.contains(r#" user="x src=9.9.9.9 host=evil" "#), "{event}");
+        assert!(
+            correlation.contains(r#" group.user="x src=9.9.9.9 host=evil" "#),
+            "{correlation}"
+        );
+        assert!(correlation.contains(r#" values=root,"a,b""#), "{correlation}");
     }
 }

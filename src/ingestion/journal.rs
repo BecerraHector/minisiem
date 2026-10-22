@@ -145,6 +145,19 @@ mod tests {
     }
 
     #[test]
+    fn takes_the_real_source_ip_when_the_username_injects_another() {
+        let line = entry(
+            "sshd-session",
+            json!("Failed password for invalid user x from 198.51.100.9 port 1 from 203.0.113.7 port 40000 ssh2"),
+        );
+
+        let event = JournalParser.parse(&line).expect("still an sshd event");
+
+        assert_eq!(event.src_ip, "203.0.113.7".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(event.user, "x from 198.51.100.9 port 1");
+    }
+
+    #[test]
     fn identifies_sshd_by_the_trusted_comm_field() {
         let message = json!("Failed password for root from 203.0.113.7 port 1 ssh2");
 
