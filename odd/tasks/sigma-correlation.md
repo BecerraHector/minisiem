@@ -22,7 +22,7 @@ Branch: `feat/sigma-correlation` · Delivery: single PR, work-unit commits (fore
 | ID | Specs | Route | Status | Evidence |
 |----|-------|-------|--------|----------|
 | T1 | S7, S10 | inline | done | RED: trait mismatch; GREEN: 67 unit + 9 CLI |
-| T2 | S2, S3, S4, S5, S6 | inline | pending | |
+| T2 | S2, S3, S4, S5, S6 | inline | done | RED: 20 failing; GREEN: 87 unit + 9 CLI |
 | T3 | S8, S9 | inline | pending | |
 | T4 | S5, S7, S8 | inline | pending | |
 | T5 | S9 | inline | pending | |
