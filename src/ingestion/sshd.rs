@@ -19,11 +19,21 @@ static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
+// sshd logs text the client chose on either side of the source IP, unescaped,
+// so it can contain a fake ` from <ip> port <n>`. Before the IP only for
+// invalid users: the client picks the name, but cannot pick an existing
+// account's. After the IP only for valid users: OpenSSH appends key or
+// hostbased details (a certificate ID, a client host name) once the user is
+// valid. So invalid-user patterns take the last `from`, and valid-user
+// patterns, whose name is a single word, take the first.
+static FAILED_INVALID_USER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Failed \S+ for invalid user (?P<user>.*) from (?P<ip>\S+) port \d+").unwrap());
+
 static FAILED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^Failed \S+ for (?:invalid user )?(?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
+    LazyLock::new(|| Regex::new(r"^Failed \S+ for (?P<user>\S+) from (?P<ip>\S+) port \d+").unwrap());
 
 static INVALID_USER: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^Invalid user (?P<user>\S*) from (?P<ip>\S+) port \d+").unwrap());
+    LazyLock::new(|| Regex::new(r"^Invalid user (?P<user>.*) from (?P<ip>\S+) port \d+").unwrap());
 
 static ACCEPTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^Accepted \S+ for (?P<user>\S+) from (?P<ip>\S+) port \d+").unwrap());
@@ -63,6 +73,7 @@ impl SshdParser {
 /// Classifies an sshd message into an event kind, user and source IP.
 fn classify(message: &str) -> Option<(EventKind, &str, IpAddr)> {
     let rules = [
+        (&*FAILED_INVALID_USER, EventKind::FailedLogin),
         (&*FAILED, EventKind::FailedLogin),
         (&*INVALID_USER, EventKind::InvalidUser),
         (&*ACCEPTED, EventKind::SuccessfulLogin),
@@ -222,5 +233,67 @@ mod tests {
         for line in lines {
             assert_eq!(parser().parse(line), None, "line should be ignored: {line:?}");
         }
+    }
+
+    /// Kind, user and source IP parsed from an sshd message.
+    fn classified(message: &str) -> (EventKind, String, IpAddr) {
+        let event = parser()
+            .parse(&format!("Oct 22 10:15:32 srv01 sshd[1]: {message}"))
+            .expect("should be an sshd event");
+        (event.kind, event.user, event.src_ip)
+    }
+
+    #[test]
+    fn takes_the_source_ip_after_an_invalid_username_that_injects_another() {
+        // sshd logs the username unescaped. Names with spaces never match a
+        // real account, so the injection only reaches invalid-user messages.
+        let real: IpAddr = "203.0.113.7".parse().unwrap();
+        let injected = "x from 198.51.100.9 port 1 ssh2";
+
+        assert_eq!(
+            classified(&format!(
+                "Failed password for invalid user {injected} from 203.0.113.7 port 40000 ssh2"
+            )),
+            (EventKind::FailedLogin, injected.to_string(), real)
+        );
+        assert_eq!(
+            classified(&format!("Invalid user {injected} from 203.0.113.7 port 40000")),
+            (EventKind::InvalidUser, injected.to_string(), real)
+        );
+        // Lines without the trailing protocol were already parsed before.
+        assert_eq!(
+            classified("Failed password for invalid user oracle from 203.0.113.7 port 40000"),
+            (EventKind::FailedLogin, "oracle".to_string(), real)
+        );
+        // So were empty usernames.
+        assert_eq!(
+            classified("Failed none for invalid user  from 203.0.113.7 port 40000 ssh2"),
+            (EventKind::FailedLogin, String::new(), real)
+        );
+        assert_eq!(
+            classified("Invalid user  from 203.0.113.7 port 40000"),
+            (EventKind::InvalidUser, String::new(), real)
+        );
+    }
+
+    #[test]
+    fn takes_the_source_ip_before_a_certificate_id_that_injects_another() {
+        // A certificate's key ID (chosen by whoever signed it) is logged after
+        // the source IP, but only for valid users, whose names have no spaces.
+        let real: IpAddr = "203.0.113.7".parse().unwrap();
+        let suffix = ": ED25519-CERT SHA256:abc ID x from 198.51.100.9 port 1 ssh2 (serial 1) CA ED25519 SHA256:def";
+
+        assert_eq!(
+            classified(&format!(
+                "Failed publickey for root from 203.0.113.7 port 40000 ssh2{suffix}"
+            )),
+            (EventKind::FailedLogin, "root".to_string(), real)
+        );
+        assert_eq!(
+            classified(&format!(
+                "Accepted publickey for hector from 203.0.113.7 port 40000 ssh2{suffix}"
+            )),
+            (EventKind::SuccessfulLogin, "hector".to_string(), real)
+        );
     }
 }
