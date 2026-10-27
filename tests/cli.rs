@@ -114,7 +114,7 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
     let marker = std::env::temp_dir().join(format!("minisiem-ctrl-c-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
     let script = format!(
-        "{}/tests/fixtures/fake-journalctl/records-interrupt.sh",
+        "{}/tests/fixtures/fake-journalctl/records-group.sh",
         env!("CARGO_MANIFEST_DIR")
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
@@ -132,6 +132,16 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
         next_line(&stderr),
         "minisiem: following journald (sshd, sshd-session, sshd-auth)"
     );
+    let journalctl_group = (0..200)
+        .find_map(|_| {
+            let group = std::fs::read_to_string(&marker).ok();
+            if group.is_none() {
+                thread::sleep(Duration::from_millis(50));
+            }
+            group
+        })
+        .expect("the fake journalctl records its process group");
+    let _ = std::fs::remove_file(&marker);
 
     let status = Command::new("kill")
         .args(["-INT", "--", &format!("-{}", child.id())])
@@ -139,11 +149,12 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
         .unwrap();
     assert!(status.success());
 
-    let code = child.wait().unwrap().code();
-    let reached = marker.exists();
-    let _ = std::fs::remove_file(&marker);
-    assert_eq!(code, Some(0));
-    assert!(!reached, "journalctl received the terminal's Ctrl+C");
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert_ne!(
+        journalctl_group.trim(),
+        child.id().to_string(),
+        "journalctl is in minisiem's process group, so a terminal's Ctrl+C reaches it"
+    );
 }
 
 #[test]
