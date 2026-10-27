@@ -172,6 +172,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
     {
         let progress = Arc::clone(&progress);
         thread::spawn(move || {
+            let _report = ReportPanic(ended.clone());
             let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
             let stop = drain_reporting(&inlet, &mut pipeline, |stats| {
                 if let Ok(mut progress) = progress.lock() {
@@ -194,6 +195,10 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         };
         match message {
             Some(End::Drained(stop, stats)) => break (stop, stats),
+            Some(End::Panicked) => {
+                let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
+                break (Err(io::Error::other("detection stopped after a panic")), stats);
+            }
             Some(End::Interrupted) => {
                 deadline.get_or_insert_with(|| Instant::now() + STOP_GRACE);
             }
@@ -225,8 +230,23 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
 enum End {
     /// The detection thread returned, with the pipeline's final stats.
     Drained(io::Result<Stop>, Stats),
+    /// The detection thread panicked (the panic message is already printed).
+    Panicked,
     /// Ctrl+C or SIGTERM.
     Interrupted,
+}
+
+/// Tells the main thread when the detection thread panics. The Ctrl+C
+/// handler keeps its own sender, so the channel never disconnects and the
+/// main thread would otherwise wait forever.
+struct ReportPanic(mpsc::Sender<End>);
+
+impl Drop for ReportPanic {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let _ = self.0.send(End::Panicked);
+        }
+    }
 }
 
 /// How long Ctrl+C waits for detection to stop before giving up on it.
@@ -245,5 +265,26 @@ fn main() -> ExitCode {
             eprintln!("minisiem: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_detection_thread_still_reports_how_it_ended() {
+        let (ended, end) = mpsc::channel();
+        // Another sender stays alive, like the Ctrl+C handler's: without the
+        // report, the main thread would wait forever.
+        let _handler = ended.clone();
+
+        let _ = thread::spawn(move || {
+            let _report = ReportPanic(ended);
+            panic!("detector bug");
+        })
+        .join();
+
+        assert!(matches!(end.recv_timeout(StdDuration::from_secs(5)), Ok(End::Panicked)));
     }
 }
