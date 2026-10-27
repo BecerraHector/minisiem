@@ -76,6 +76,66 @@ fn watch_alerts_on_udp_syslog_and_stops_cleanly_on_interrupt() {
     assert_eq!(next_line(&stderr), "minisiem: watch: events=10 alerts=1");
 }
 
+/// Waits for the child to exit, killing it if it takes longer than `limit`.
+fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+    for _ in 0..limit.as_millis() / 50 {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    None
+}
+
+#[test]
+fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--syslog-udp", "127.0.0.1:0", "--threshold", "1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Kept open but never read: once the pipe fills, writing an alert blocks.
+    let _unread_stdout = child.stdout.take().unwrap();
+    let stderr = lines_of(child.stderr.take().unwrap());
+
+    let listening = next_line(&stderr);
+    let addr = listening
+        .strip_prefix("minisiem: listening for syslog on udp://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {listening}"));
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    // One alert per source IP: far more output than a pipe buffer holds.
+    for i in 0..2000u32 {
+        let frame = format!(
+            "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 10.0.{}.{} port 1 ssh2",
+            i / 250,
+            i % 250 + 1
+        );
+        sender.send_to(frame.as_bytes(), addr).unwrap();
+        if i % 100 == 99 {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    interrupt(&child);
+    let status = wait_at_most(&mut child, Duration::from_secs(10));
+
+    assert_eq!(
+        status.map(|s| s.code()),
+        Some(Some(0)),
+        "watch must stop on Ctrl+C while blocked writing to stdout"
+    );
+    assert_eq!(
+        next_line(&stderr),
+        "minisiem: watch: stdout is blocked, stopping without writing pending alerts"
+    );
+    let summary = next_line(&stderr);
+    assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
+}
+
 #[test]
 fn watch_needs_at_least_one_source() {
     let output = minisiem(&["watch"]);

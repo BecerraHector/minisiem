@@ -3,6 +3,10 @@ use std::io::{self, BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Local, Offset};
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -11,9 +15,9 @@ use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
-use minisiem::pipeline::Pipeline;
+use minisiem::pipeline::{Pipeline, Stats};
 use minisiem::rule_loading;
-use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain};
+use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain_reporting};
 
 /// Detect attacks in sshd logs.
 ///
@@ -151,15 +155,59 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         false => None,
     };
 
+    // Detection runs on its own thread, so this one can still stop watching
+    // when writing an alert blocks (e.g. stdout is a pipe nobody reads).
+    let (ended, end) = mpsc::channel();
+    let interrupted = ended.clone();
     let shutdown = outlet.clone();
-    ctrlc::set_handler(move || shutdown.shutdown()).map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
+    ctrlc::set_handler(move || {
+        shutdown.shutdown();
+        let _ = interrupted.send(End::Interrupted);
+    })
+    .map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
     drop(outlet);
 
-    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
-    let stop = drain(&inlet, &mut pipeline).map_err(|e| e.to_string());
+    let progress = Arc::new(Mutex::new(Stats::default()));
+    let dropped = inlet.dropped_counter();
+    {
+        let progress = Arc::clone(&progress);
+        thread::spawn(move || {
+            let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
+            let stop = drain_reporting(&inlet, &mut pipeline, |stats| {
+                if let Ok(mut progress) = progress.lock() {
+                    *progress = stats;
+                }
+            });
+            let _ = ended.send(End::Drained(stop, pipeline.stats()));
+        });
+    }
 
-    let stats = pipeline.stats();
-    let dropped = match inlet.dropped() {
+    // Ctrl+C has already queued a shutdown for the pipeline: give it a
+    // moment, counted from the first Ctrl+C.
+    let mut deadline: Option<Instant> = None;
+    let (stop, stats) = loop {
+        let message = match deadline {
+            None => end.recv().ok(),
+            Some(deadline) => end
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok(),
+        };
+        match message {
+            Some(End::Drained(stop, stats)) => break (stop, stats),
+            Some(End::Interrupted) => {
+                deadline.get_or_insert_with(|| Instant::now() + STOP_GRACE);
+            }
+            None => {
+                // Stuck writing an alert. Leave it: exiting ends the thread,
+                // and the alert would never be read anyway.
+                eprintln!("minisiem: watch: stdout is blocked, stopping without writing pending alerts");
+                let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
+                break (Ok(Stop::Interrupted), stats);
+            }
+        }
+    };
+
+    let dropped = match dropped.load(Ordering::Relaxed) {
         0 => String::new(),
         n => format!(" dropped={n}"),
     };
@@ -167,11 +215,22 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         "minisiem: watch: events={} alerts={}{dropped}",
         stats.events, stats.alerts
     );
-    match stop? {
+    match stop.map_err(|e| e.to_string())? {
         Stop::Interrupted => Ok(()),
         Stop::SourceFailed { source, error } => Err(format!("{source}: {error}")),
     }
 }
+
+/// How watching ended, as seen from the main thread.
+enum End {
+    /// The detection thread returned, with the pipeline's final stats.
+    Drained(io::Result<Stop>, Stats),
+    /// Ctrl+C or SIGTERM.
+    Interrupted,
+}
+
+/// How long Ctrl+C waits for detection to stop before giving up on it.
+const STOP_GRACE: StdDuration = StdDuration::from_secs(2);
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

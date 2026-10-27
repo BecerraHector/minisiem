@@ -11,6 +11,7 @@ use crate::event::Event;
 
 /// Port: a stateful detection rule fed one event at a time. One event can
 /// raise several alerts (e.g. a rule and a correlation built on it).
-pub trait Detector {
+/// `Send` so watch mode can run detection off the main thread.
+pub trait Detector: Send {
     fn evaluate(&mut self, event: &Event) -> Vec<Alert>;
 }
