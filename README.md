@@ -161,7 +161,8 @@ Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog
 written as they are raised; if stdout stops draining (a pipe nobody reads), detection waits for it
 without losing alerts, and Ctrl+C still stops within 2 seconds: watch prints
 `detection did not stop within 2s (stdout blocked?), stopping without writing pending alerts` and
-the summary, and exits with `0`.
+the summary, and exits with `0`. That summary counts the events fully processed, so it leaves out
+the one whose alert was stuck.
 
 ### Trust model
 
