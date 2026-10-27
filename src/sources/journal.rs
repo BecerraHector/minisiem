@@ -58,15 +58,16 @@ impl JournalFollow {
         let exited = Arc::clone(&child);
         thread::spawn(move || {
             let result = forward_events(BufReader::new(stdout), &outlet);
-            outlet.fail(SOURCE, stop_reason(result, &exited, relay));
+            outlet.fail(SOURCE, stop_and_explain(result, &exited, relay));
         });
 
         Ok(Self { child })
     }
 }
 
-/// Why reading `journalctl` ended, once its stderr relay has finished.
-fn stop_reason(result: io::Result<()>, child: &Mutex<Child>, relay: JoinHandle<()>) -> String {
+/// Stops `journalctl` once reading its output ended: kills it if it still
+/// runs, waits for its stderr relay, reaps it, and explains why it stopped.
+fn stop_and_explain(result: io::Result<()>, child: &Mutex<Child>, relay: JoinHandle<()>) -> String {
     // Usually journalctl is already gone (stdout closed). After a read error,
     // or once the pipeline is gone, it may still run, and the relay would
     // wait for its stderr forever: stop it first. Killing an exited process
@@ -185,7 +186,7 @@ mod tests {
         let (done, reported) = std::sync::mpsc::channel();
         let running = Arc::clone(&child);
         thread::spawn(move || {
-            let reason = stop_reason(Err(io::Error::other("boom")), &running, relay);
+            let reason = stop_and_explain(Err(io::Error::other("boom")), &running, relay);
             let _ = done.send(reason);
         });
         let reason = reported.recv_timeout(std::time::Duration::from_secs(5));

@@ -107,6 +107,29 @@ fn watch_journal(fake: &str) -> Child {
         .unwrap()
 }
 
+/// Kills minisiem's and the fake journalctl's process groups if the test
+/// fails before minisiem exits, so a failing run leaves nothing running.
+/// Only on failure: after a clean exit the group IDs may already be reused.
+struct KillGroupsOnFailure {
+    minisiem: u32,
+    marker: std::path::PathBuf,
+}
+
+impl Drop for KillGroupsOnFailure {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let journalctl = std::fs::read_to_string(&self.marker).ok();
+            let groups = std::iter::once(self.minisiem.to_string()).chain(journalctl.map(|g| g.trim().to_string()));
+            for group in groups {
+                let _ = Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{group}")])
+                    .status();
+            }
+        }
+        let _ = std::fs::remove_file(&self.marker);
+    }
+}
+
 #[test]
 fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
     // A terminal sends Ctrl+C to the whole foreground process group. If it
@@ -127,6 +150,10 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
         .process_group(0)
         .spawn()
         .unwrap();
+    let _cleanup = KillGroupsOnFailure {
+        minisiem: child.id(),
+        marker: marker.clone(),
+    };
     let stderr = lines_of(child.stderr.take().unwrap());
     assert_eq!(
         next_line(&stderr),
@@ -141,7 +168,6 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
             group
         })
         .expect("the fake journalctl records its process group");
-    let _ = std::fs::remove_file(&marker);
 
     let status = Command::new("kill")
         .args(["-INT", "--", &format!("-{}", child.id())])
