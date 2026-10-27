@@ -130,7 +130,8 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     );
     assert_eq!(
         next_line(&stderr),
-        "minisiem: watch: stdout is blocked, stopping without writing pending alerts"
+        "minisiem: watch: detection did not stop within 2s (stdout blocked?), stopping without writing pending \
+         alerts"
     );
     let summary = next_line(&stderr);
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");

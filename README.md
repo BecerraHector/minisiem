@@ -160,7 +160,8 @@ Dropping is itself a blind spot an attacker can cause on purpose, which is why i
 Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog. Alerts are
 written as they are raised; if stdout stops draining (a pipe nobody reads), detection waits for it
 without losing alerts, and Ctrl+C still stops within 2 seconds: watch prints
-`stdout is blocked, stopping without writing pending alerts` and the summary, and exits with `0`.
+`detection did not stop within 2s (stdout blocked?), stopping without writing pending alerts` and
+the summary, and exits with `0`.
 
 ### Trust model
 

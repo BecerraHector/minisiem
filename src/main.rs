@@ -179,7 +179,10 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
                     *progress = stats;
                 }
             });
-            let _ = ended.send(End::Drained(stop, pipeline.stats()));
+            let stats = pipeline.stats();
+            // Release stdout before the main thread reports and exits.
+            drop(pipeline);
+            let _ = ended.send(End::Drained(stop, stats));
         });
     }
 
@@ -196,16 +199,22 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         match message {
             Some(End::Drained(stop, stats)) => break (stop, stats),
             Some(End::Panicked) => {
-                let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
-                break (Err(io::Error::other("detection stopped after a panic")), stats);
+                // Exit as the panic would have on the main thread (code 101,
+                // message already printed), but stop journalctl first.
+                drop(_journal);
+                std::process::exit(101);
             }
             Some(End::Interrupted) => {
                 deadline.get_or_insert_with(|| Instant::now() + STOP_GRACE);
             }
             None => {
-                // Stuck writing an alert. Leave it: exiting ends the thread,
-                // and the alert would never be read anyway.
-                eprintln!("minisiem: watch: stdout is blocked, stopping without writing pending alerts");
+                // Usually stuck writing an alert nobody reads. Leave it:
+                // exiting ends the thread.
+                eprintln!(
+                    "minisiem: watch: detection did not stop within {}s (stdout blocked?), stopping without \
+                     writing pending alerts",
+                    STOP_GRACE.as_secs()
+                );
                 let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
                 break (Ok(Stop::Interrupted), stats);
             }
