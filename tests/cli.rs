@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::UdpSocket;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -112,13 +113,13 @@ fn watch_journal(fake: &str) -> Child {
 /// Only on failure: after a clean exit the group IDs may already be reused.
 struct KillGroupsOnFailure {
     minisiem: u32,
-    marker: std::path::PathBuf,
+    dir: std::path::PathBuf,
 }
 
 impl Drop for KillGroupsOnFailure {
     fn drop(&mut self) {
         if thread::panicking() {
-            let journalctl = std::fs::read_to_string(&self.marker).ok();
+            let journalctl = std::fs::read_to_string(self.dir.join("group")).ok();
             let groups = std::iter::once(self.minisiem.to_string()).chain(journalctl.map(|g| g.trim().to_string()));
             for group in groups {
                 let _ = Command::new("kill")
@@ -126,16 +127,33 @@ impl Drop for KillGroupsOnFailure {
                     .status();
             }
         }
-        let _ = std::fs::remove_file(&self.marker);
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+/// True while any process of the group runs.
+fn group_exists(group: &str) -> bool {
+    Command::new("kill")
+        .args(["-0", "--", &format!("-{group}")])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[test]
 fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
     // A terminal sends Ctrl+C to the whole foreground process group. If it
     // reached journalctl too, its exit could be reported as a failure.
-    let marker = std::env::temp_dir().join(format!("minisiem-ctrl-c-{}", std::process::id()));
-    let _ = std::fs::remove_file(&marker);
+    //
+    // The group the cleanup kills is read back from a file, so it lives in a
+    // directory only this test can write: creating it fails if it exists.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("minisiem-ctrl-c-{}-{nanos}", std::process::id()));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+    let marker = dir.join("group");
     let script = format!(
         "{}/tests/fixtures/fake-journalctl/records-group.sh",
         env!("CARGO_MANIFEST_DIR")
@@ -152,7 +170,7 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
         .unwrap();
     let _cleanup = KillGroupsOnFailure {
         minisiem: child.id(),
-        marker: marker.clone(),
+        dir: dir.clone(),
     };
     let stderr = lines_of(child.stderr.take().unwrap());
     assert_eq!(
@@ -168,6 +186,12 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
             group
         })
         .expect("the fake journalctl records its process group");
+    let journalctl_group = journalctl_group.trim();
+    assert_ne!(
+        journalctl_group,
+        child.id().to_string(),
+        "journalctl is in minisiem's process group, so a terminal's Ctrl+C reaches it"
+    );
 
     let status = Command::new("kill")
         .args(["-INT", "--", &format!("-{}", child.id())])
@@ -176,11 +200,16 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
     assert!(status.success());
 
     assert_eq!(child.wait().unwrap().code(), Some(0));
-    assert_ne!(
-        journalctl_group.trim(),
-        child.id().to_string(),
-        "journalctl is in minisiem's process group, so a terminal's Ctrl+C reaches it"
-    );
+    // Out of reach of Ctrl+C, journalctl is stopped by minisiem itself. The
+    // fake's last `sleep` may outlive it briefly, so give the group a moment.
+    let stopped = (0..40).any(|_| {
+        let gone = !group_exists(journalctl_group);
+        if !gone {
+            thread::sleep(Duration::from_millis(50));
+        }
+        gone
+    });
+    assert!(stopped, "journalctl is still running after minisiem exited");
 }
 
 #[test]
