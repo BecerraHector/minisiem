@@ -157,7 +157,12 @@ a source that silently stopped would be a blind spot.
 Events wait for the detectors in a queue of 10,000. When a flood fills it, new events are dropped
 instead of exhausting memory: the first drop prints a warning and the summary adds `dropped=N`.
 Dropping is itself a blind spot an attacker can cause on purpose, which is why it is never silent.
-Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog.
+Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog. Alerts are
+written as they are raised; if stdout stops draining (a pipe nobody reads), detection waits for it
+without losing alerts, and Ctrl+C still stops within 2 seconds: watch prints
+`detection did not stop within 2s (stdout blocked?), stopping without writing pending alerts` and
+the summary, and exits with `0`. That summary counts the events fully processed, so it leaves out
+the one whose alert was stuck.
 
 ### Trust model
 

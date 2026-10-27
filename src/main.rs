@@ -3,6 +3,10 @@ use std::io::{self, BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Local, Offset};
 use clap::{ArgGroup, Args, Parser, Subcommand};
@@ -11,9 +15,9 @@ use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
-use minisiem::pipeline::Pipeline;
+use minisiem::pipeline::{Pipeline, Stats};
 use minisiem::rule_loading;
-use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain};
+use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain_reporting};
 
 /// Detect attacks in sshd logs.
 ///
@@ -151,15 +155,73 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         false => None,
     };
 
+    // Detection runs on its own thread, so this one can still stop watching
+    // when writing an alert blocks (e.g. stdout is a pipe nobody reads).
+    let (ended, end) = mpsc::channel();
+    let interrupted = ended.clone();
     let shutdown = outlet.clone();
-    ctrlc::set_handler(move || shutdown.shutdown()).map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
+    ctrlc::set_handler(move || {
+        shutdown.shutdown();
+        let _ = interrupted.send(End::Interrupted);
+    })
+    .map_err(|e| format!("cannot handle Ctrl+C: {e}"))?;
     drop(outlet);
 
-    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
-    let stop = drain(&inlet, &mut pipeline).map_err(|e| e.to_string());
+    let progress = Arc::new(Mutex::new(Stats::default()));
+    let dropped = inlet.dropped_counter();
+    {
+        let progress = Arc::clone(&progress);
+        thread::spawn(move || {
+            let _report = ReportPanic(ended.clone());
+            let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
+            let stop = drain_reporting(&inlet, &mut pipeline, |stats| {
+                if let Ok(mut progress) = progress.lock() {
+                    *progress = stats;
+                }
+            });
+            let stats = pipeline.stats();
+            // Release stdout before the main thread reports and exits.
+            drop(pipeline);
+            let _ = ended.send(End::Drained(stop, stats));
+        });
+    }
 
-    let stats = pipeline.stats();
-    let dropped = match inlet.dropped() {
+    // Ctrl+C has already queued a shutdown for the pipeline: give it a
+    // moment, counted from the first Ctrl+C.
+    let mut deadline: Option<Instant> = None;
+    let (stop, stats) = loop {
+        let message = match deadline {
+            None => end.recv().ok(),
+            Some(deadline) => end
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok(),
+        };
+        match message {
+            Some(End::Drained(stop, stats)) => break (stop, stats),
+            Some(End::Panicked) => {
+                // Exit as the panic would have on the main thread (code 101,
+                // message already printed), but stop journalctl first.
+                drop(_journal);
+                std::process::exit(101);
+            }
+            Some(End::Interrupted) => {
+                deadline.get_or_insert_with(|| Instant::now() + STOP_GRACE);
+            }
+            None => {
+                // Usually stuck writing an alert nobody reads. Leave it:
+                // exiting ends the thread.
+                eprintln!(
+                    "minisiem: watch: detection did not stop within {}s (stdout blocked?), stopping without \
+                     writing pending alerts",
+                    STOP_GRACE.as_secs()
+                );
+                let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
+                break (Ok(Stop::Interrupted), stats);
+            }
+        }
+    };
+
+    let dropped = match dropped.load(Ordering::Relaxed) {
         0 => String::new(),
         n => format!(" dropped={n}"),
     };
@@ -167,11 +229,37 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         "minisiem: watch: events={} alerts={}{dropped}",
         stats.events, stats.alerts
     );
-    match stop? {
+    match stop.map_err(|e| e.to_string())? {
         Stop::Interrupted => Ok(()),
         Stop::SourceFailed { source, error } => Err(format!("{source}: {error}")),
     }
 }
+
+/// How watching ended, as seen from the main thread.
+enum End {
+    /// The detection thread returned, with the pipeline's final stats.
+    Drained(io::Result<Stop>, Stats),
+    /// The detection thread panicked (the panic message is already printed).
+    Panicked,
+    /// Ctrl+C or SIGTERM.
+    Interrupted,
+}
+
+/// Tells the main thread when the detection thread panics. The Ctrl+C
+/// handler keeps its own sender, so the channel never disconnects and the
+/// main thread would otherwise wait forever.
+struct ReportPanic(mpsc::Sender<End>);
+
+impl Drop for ReportPanic {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let _ = self.0.send(End::Panicked);
+        }
+    }
+}
+
+/// How long Ctrl+C waits for detection to stop before giving up on it.
+const STOP_GRACE: StdDuration = StdDuration::from_secs(2);
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -186,5 +274,26 @@ fn main() -> ExitCode {
             eprintln!("minisiem: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_detection_thread_still_reports_how_it_ended() {
+        let (ended, end) = mpsc::channel();
+        // Another sender stays alive, like the Ctrl+C handler's: without the
+        // report, the main thread would wait forever.
+        let _handler = ended.clone();
+
+        let _ = thread::spawn(move || {
+            let _report = ReportPanic(ended);
+            panic!("detector bug");
+        })
+        .join();
+
+        assert!(matches!(end.recv_timeout(StdDuration::from_secs(5)), Ok(End::Panicked)));
     }
 }

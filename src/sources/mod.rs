@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use crate::alerting::AlertSink;
 use crate::event::Event;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, Stats};
 
 /// Events waiting for the pipeline before new ones are dropped.
 pub const QUEUE_CAPACITY: usize = 10_000;
@@ -108,6 +108,11 @@ impl Inlet {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+
+    /// The live count behind [`Inlet::dropped`], readable from another thread.
+    pub fn dropped_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dropped)
+    }
 }
 
 /// Why watching ended.
@@ -121,6 +126,16 @@ pub enum Stop {
 /// fails. A failed source ends the watch: a source that silently stopped
 /// would be a blind spot.
 pub fn drain<S: AlertSink>(inlet: &Inlet, pipeline: &mut Pipeline<S>) -> io::Result<Stop> {
+    drain_reporting(inlet, pipeline, |_| {})
+}
+
+/// Like [`drain`], and hands the pipeline's stats to `progress` after every
+/// event, so another thread can report them if this one gets stuck.
+pub fn drain_reporting<S: AlertSink>(
+    inlet: &Inlet,
+    pipeline: &mut Pipeline<S>,
+    mut progress: impl FnMut(Stats),
+) -> io::Result<Stop> {
     loop {
         // Control first, before every event: stopping never waits for a
         // backlog to be processed.
@@ -131,7 +146,10 @@ pub fn drain<S: AlertSink>(inlet: &Inlet, pipeline: &mut Pipeline<S>) -> io::Res
         }
 
         match inlet.events.recv_timeout(POLL) {
-            Ok(event) => pipeline.process(&event)?,
+            Ok(event) => {
+                pipeline.process(&event)?;
+                progress(pipeline.stats());
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
                 return Ok(Stop::SourceFailed {
@@ -204,6 +222,24 @@ mod tests {
             (pipeline.stats().events, pipeline.stats().alerts),
             (2, 1),
             "the third event stays queued: shutdown wins"
+        );
+    }
+
+    #[test]
+    fn reports_progress_after_every_event() {
+        let (outlet, inlet) = channel(10);
+        let mut pipeline = pipeline(&outlet);
+        for secs in 0..3 {
+            outlet.event(failed(secs));
+        }
+        let mut seen = Vec::new();
+
+        drain_reporting(&inlet, &mut pipeline, |stats| seen.push((stats.events, stats.alerts))).unwrap();
+
+        assert_eq!(
+            seen,
+            [(1, 0), (2, 1)],
+            "the shutdown raised by the alert stops the third"
         );
     }
 
