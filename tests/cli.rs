@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::UdpSocket;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -104,6 +105,45 @@ fn watch_journal(fake: &str) -> Child {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap()
+}
+
+#[test]
+fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
+    // A terminal sends Ctrl+C to the whole foreground process group. If it
+    // reached journalctl too, its exit could be reported as a failure.
+    let marker = std::env::temp_dir().join(format!("minisiem-ctrl-c-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let script = format!(
+        "{}/tests/fixtures/fake-journalctl/records-interrupt.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--journal"])
+        .env("MINISIEM_JOURNALCTL", script)
+        .env("FAKE_JOURNALCTL_MARKER", &marker)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        // Its own group, standing in for the terminal's foreground group.
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let stderr = lines_of(child.stderr.take().unwrap());
+    assert_eq!(
+        next_line(&stderr),
+        "minisiem: following journald (sshd, sshd-session, sshd-auth)"
+    );
+
+    let status = Command::new("kill")
+        .args(["-INT", "--", &format!("-{}", child.id())])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let code = child.wait().unwrap().code();
+    let reached = marker.exists();
+    let _ = std::fs::remove_file(&marker);
+    assert_eq!(code, Some(0));
+    assert!(!reached, "journalctl received the terminal's Ctrl+C");
 }
 
 #[test]
