@@ -152,17 +152,23 @@ if $programname startswith 'sshd' then @127.0.0.1:5514;RSYSLOG_SyslogProtocol23F
 ```
 
 If a source stops (`journalctl` exits, the socket fails), watch reports it and exits with code 1:
-a source that silently stopped would be a blind spot.
+a source that silently stopped would be a blind spot. The events it had already sent are processed
+first, as the last ones before it died may be the most relevant.
 
-Events wait for the detectors in a queue of 10,000. When a flood fills it, new events are dropped
-instead of exhausting memory: the first drop prints a warning and the summary adds `dropped=N`.
-Dropping is itself a blind spot an attacker can cause on purpose, which is why it is never silent.
-Ctrl+C and failing sources skip the queue, so stopping never waits for a backlog. Alerts are
+Events wait for the detectors in a queue of 10,000. When a flood fills it, new UDP events are
+dropped instead of exhausting memory: the first drop prints a warning and the summary adds
+`dropped=N`. Dropping is itself a blind spot an attacker can cause on purpose, which is why it is
+never silent. journald events are not dropped: the journald source waits for room, `journalctl`
+waits with it, and journald keeps the entries meanwhile. The queue is shared, though: while journald
+has a backlog it takes almost every free slot, so with `--syslog-udp` too nearly all UDP events are
+dropped (and counted) until it catches up. Anyone who can make sshd log on the host can cause that
+on purpose; a fair share per source is tracked in #15. Ctrl+C skips the queue, so stopping never
+waits for a backlog; the events left in it are counted as `unprocessed=N` in the summary. Alerts are
 written as they are raised; if stdout stops draining (a pipe nobody reads), detection waits for it
 without losing alerts, and Ctrl+C still stops within 2 seconds: watch prints
 `detection did not stop within 2s (stdout blocked?), stopping without writing pending alerts` and
 the summary, and exits with `0`. That summary counts the events fully processed, so it leaves out
-the one whose alert was stuck.
+the one whose alert was stuck, and it cannot report `unprocessed` events.
 
 ### Trust model
 

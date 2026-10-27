@@ -182,14 +182,15 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
             let stats = pipeline.stats();
             // Release stdout before the main thread reports and exits.
             drop(pipeline);
-            let _ = ended.send(End::Drained(stop, stats));
+            let unprocessed = inlet.discard_queued();
+            let _ = ended.send(End::Drained(stop, stats, unprocessed));
         });
     }
 
     // Ctrl+C has already queued a shutdown for the pipeline: give it a
     // moment, counted from the first Ctrl+C.
     let mut deadline: Option<Instant> = None;
-    let (stop, stats) = loop {
+    let (stop, stats, unprocessed) = loop {
         let message = match deadline {
             None => end.recv().ok(),
             Some(deadline) => end
@@ -197,7 +198,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
                 .ok(),
         };
         match message {
-            Some(End::Drained(stop, stats)) => break (stop, stats),
+            Some(End::Drained(stop, stats, unprocessed)) => break (stop, stats, unprocessed),
             Some(End::Panicked) => {
                 // Exit as the panic would have on the main thread (code 101,
                 // message already printed), but stop journalctl first.
@@ -216,7 +217,8 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
                     STOP_GRACE.as_secs()
                 );
                 let stats = progress.lock().map(|stats| *stats).unwrap_or_default();
-                break (Ok(Stop::Interrupted), stats);
+                // The queue is the stuck thread's: it cannot be counted.
+                break (Ok(Stop::Interrupted), stats, 0);
             }
         }
     };
@@ -225,8 +227,12 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         0 => String::new(),
         n => format!(" dropped={n}"),
     };
+    let unprocessed = match unprocessed {
+        0 => String::new(),
+        n => format!(" unprocessed={n}"),
+    };
     eprintln!(
-        "minisiem: watch: events={} alerts={}{dropped}",
+        "minisiem: watch: events={} alerts={}{dropped}{unprocessed}",
         stats.events, stats.alerts
     );
     match stop.map_err(|e| e.to_string())? {
@@ -237,8 +243,9 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
 
 /// How watching ended, as seen from the main thread.
 enum End {
-    /// The detection thread returned, with the pipeline's final stats.
-    Drained(io::Result<Stop>, Stats),
+    /// The detection thread returned, with the pipeline's final stats and
+    /// the events it left in the queue.
+    Drained(io::Result<Stop>, Stats, usize),
     /// The detection thread panicked (the panic message is already printed).
     Panicked,
     /// Ctrl+C or SIGTERM.
