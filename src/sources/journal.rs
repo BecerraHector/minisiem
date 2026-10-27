@@ -3,9 +3,10 @@
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use super::Outlet;
 use crate::ingestion::{JournalParser, LogParser, SSHD_PROCESSES};
@@ -57,29 +58,47 @@ impl JournalFollow {
         let exited = Arc::clone(&child);
         thread::spawn(move || {
             let result = forward_events(BufReader::new(stdout), &outlet);
-            // stdout closed, so journalctl is gone. Let its last words reach
-            // stderr before reporting, or the process may exit first.
-            let _ = relay.join();
-            let status = exited.lock().ok().and_then(|mut child| child.wait().ok());
-            let error = match (result, status) {
-                (Err(e), _) => format!("reading journalctl output failed: {e}"),
-                (Ok(()), Some(status)) => format!("journalctl exited ({status})"),
-                (Ok(()), None) => "journalctl exited".into(),
-            };
-            outlet.fail(SOURCE, error);
+            outlet.fail(SOURCE, stop_and_explain(result, &exited, relay));
         });
 
         Ok(Self { child })
     }
 }
 
+/// Stops `journalctl` once reading its output ended: kills it if it still
+/// runs, waits for its stderr relay, reaps it, and explains why it stopped.
+fn stop_and_explain(result: io::Result<()>, child: &Mutex<Child>, relay: JoinHandle<()>) -> String {
+    // Usually journalctl is already gone (stdout closed). After a read error,
+    // or once the pipeline is gone, it may still run, and the relay would
+    // wait for its stderr forever: stop it first. Killing an exited process
+    // is harmless and keeps its exit status.
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+    }
+    // Let journalctl's last words reach stderr before reporting, or the
+    // process may exit first.
+    let _ = relay.join();
+    let status = child.lock().ok().and_then(|mut child| child.wait().ok());
+    match (result, status) {
+        (Err(e), _) => format!("reading journalctl output failed: {e}"),
+        (Ok(()), Some(status)) => format!("journalctl exited ({status})"),
+        (Ok(()), None) => "journalctl exited".into(),
+    }
+}
+
 /// `journalctl` following new entries of OpenSSH processes only. The match
 /// is on `_COMM`, which journald sets itself: `--identifier=sshd` would
 /// match `SYSLOG_IDENTIFIER`, which any process can claim.
+///
+/// It runs in its own process group: Ctrl+C in a terminal signals the whole
+/// foreground group, and journalctl exiting on it could be reported as a
+/// failed source before minisiem handles the interrupt. minisiem stops it
+/// instead (see `Drop`).
 fn journalctl_command(program: OsString) -> Command {
     let mut command = Command::new(program);
     command.args(["--follow", "--output=json", "--lines=0", "--no-pager"]);
     command.args(SSHD_PROCESSES.iter().map(|process| format!("_COMM={process}")));
+    command.process_group(0);
     command
 }
 
@@ -152,6 +171,32 @@ mod tests {
             inlet.events.iter().count(),
             11,
             "10 failures and 1 login; spoofed and unrelated entries skipped"
+        );
+    }
+
+    #[test]
+    fn reports_a_read_error_while_journalctl_is_still_running() {
+        // The relay ends only when stderr closes, which a live journalctl
+        // never does on its own.
+        let mut child = Command::new("sleep").arg("600").stderr(Stdio::piped()).spawn().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let relay = thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
+        let child = Arc::new(Mutex::new(child));
+
+        let (done, reported) = std::sync::mpsc::channel();
+        let running = Arc::clone(&child);
+        thread::spawn(move || {
+            let reason = stop_and_explain(Err(io::Error::other("boom")), &running, relay);
+            let _ = done.send(reason);
+        });
+        let reason = reported.recv_timeout(std::time::Duration::from_secs(5));
+
+        // Never leave the stand-in running, whatever the outcome.
+        let _ = child.lock().map(|mut child| child.kill());
+        assert_eq!(
+            reason.as_deref(),
+            Ok("reading journalctl output failed: boom"),
+            "the failure must be reported, not wait for journalctl forever"
         );
     }
 
