@@ -140,9 +140,11 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
     let detectors = args.detection.detectors()?;
     let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
 
+    let mut kernel_drops = None;
     if let Some(addr) = args.syslog_udp {
         let udp = SyslogUdp::bind(addr, args.allow_remote_syslog)?;
         eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
+        kernel_drops = udp.kernel_drops();
         udp.spawn(parser(), outlet.clone());
     }
     // Kept alive until watching ends: dropping it stops journalctl.
@@ -231,8 +233,13 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         0 => String::new(),
         n => format!(" unprocessed={n}"),
     };
+    // Datagrams lost before minisiem could read them, where the kernel tells.
+    let kernel_dropped = match kernel_drops.and_then(|drops| drops.count()) {
+        None | Some(0) => String::new(),
+        Some(n) => format!(" kernel_dropped={n}"),
+    };
     eprintln!(
-        "minisiem: watch: events={} alerts={}{dropped}{unprocessed}",
+        "minisiem: watch: events={} alerts={}{dropped}{unprocessed}{kernel_dropped}",
         stats.events, stats.alerts
     );
     match stop.map_err(|e| e.to_string())? {

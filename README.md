@@ -158,7 +158,10 @@ first, as the last ones before it died may be the most relevant.
 Events wait for the detectors in a queue of 10,000. When a flood fills it, new UDP events are
 dropped instead of exhausting memory: the first drop prints a warning and the summary adds
 `dropped=N`. Dropping is itself a blind spot an attacker can cause on purpose, which is why it is
-never silent. journald events are not dropped: the journald source waits for room, `journalctl`
+never silent. A UDP flood can also outrun the reader before the queue: the kernel then drops
+datagrams once the socket buffer is full. On Linux minisiem reads the socket's drop counter from
+`/proc/net/udp`, warns once when the kernel starts dropping and adds `kernel_dropped=N` to the
+summary; elsewhere those drops stay uncounted. journald events are not dropped: the journald source waits for room, `journalctl`
 waits with it, and journald keeps the entries meanwhile. journald holds at most half the queue, so a
 journald backlog never takes the room UDP events need: with both sources flooding, each gets through,
 and UDP only drops once its own half is full. Ctrl+C skips the queue, so stopping never
@@ -217,7 +220,7 @@ Ctrl+C / SIGTERM ─────────┘ (shutdown)
 - Events must arrive in chronological order; in watch mode, sources are interleaved as events
   arrive, so slightly late events are tolerated but not reordered.
 - Lines are not length-limited in batch mode or from journald.
-- UDP datagrams the kernel drops because the socket buffer is full are not counted: under a flood
-  they never reach minisiem (a 300,000-datagram flood on a debug build delivered about 25,000).
-  Linux exposes them in `/proc/net/udp` and through `SO_RXQ_OVFL`.
+- A UDP flood loses datagrams in the kernel before minisiem reads them (a 300,000-datagram flood on
+  a debug build delivered about 25,000): they are counted as `kernel_dropped=N` on Linux, but not
+  recovered, and not counted elsewhere.
 - A single group can still hold many entries if one source floods matches within one window.

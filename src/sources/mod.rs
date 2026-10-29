@@ -13,7 +13,7 @@ mod journal;
 mod syslog_udp;
 
 pub use journal::{JOURNALCTL_ENV, JournalFollow};
-pub use syslog_udp::{SyslogUdp, event_from_datagram};
+pub use syslog_udp::{KernelDrops, SyslogUdp, event_from_datagram};
 
 use std::io;
 use std::sync::Arc;
