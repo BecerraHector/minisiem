@@ -3,7 +3,9 @@
 //! [`Inlet`] on a single thread, so detectors never need locks.
 //!
 //! Events travel through a bounded queue: a flood cannot exhaust memory, it
-//! can only make events drop, and drops are counted and reported. Control
+//! can only make events drop, and drops are counted and reported. Sources
+//! that wait instead of dropping hold at most half of it, so a backlog they
+//! wait out never leaves the dropping sources without room. Control
 //! messages (shutdown, failed sources) use a separate channel the pipeline
 //! checks first, so they never wait behind a backlog of events.
 
@@ -26,6 +28,18 @@ use crate::pipeline::{Pipeline, Stats};
 /// Events waiting for the pipeline before new ones are dropped.
 pub const QUEUE_CAPACITY: usize = 10_000;
 
+/// The part of a queue sources that wait may hold: the rest stays for the
+/// sources that drop.
+fn waiting_share(capacity: usize) -> usize {
+    (capacity / 2).max(1)
+}
+
+/// An event in the queue, marked with whether its source waited for room.
+struct Queued {
+    event: Event,
+    waited: bool,
+}
+
 /// How long the pipeline waits for an event before checking control again.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -40,14 +54,18 @@ enum Control {
 /// The sending side, cloned into every source.
 #[derive(Clone)]
 pub struct Outlet {
-    events: SyncSender<Event>,
+    events: SyncSender<Queued>,
+    /// One slot per waiting event in the queue: full means the waiting
+    /// sources hold their whole share.
+    waiting: SyncSender<()>,
     control: Sender<Control>,
     dropped: Arc<AtomicU64>,
 }
 
 /// The receiving side, owned by the pipeline thread.
 pub struct Inlet {
-    events: Receiver<Event>,
+    events: Receiver<Queued>,
+    waiting: Receiver<()>,
     control: Receiver<Control>,
     dropped: Arc<AtomicU64>,
     capacity: usize,
@@ -55,16 +73,19 @@ pub struct Inlet {
 
 pub fn channel(capacity: usize) -> (Outlet, Inlet) {
     let (event_tx, event_rx) = mpsc::sync_channel(capacity);
+    let (waiting_tx, waiting_rx) = mpsc::sync_channel(waiting_share(capacity));
     let (control_tx, control_rx) = mpsc::channel();
     let dropped = Arc::new(AtomicU64::new(0));
     (
         Outlet {
             events: event_tx,
+            waiting: waiting_tx,
             control: control_tx,
             dropped: Arc::clone(&dropped),
         },
         Inlet {
             events: event_rx,
+            waiting: waiting_rx,
             control: control_rx,
             dropped,
             capacity,
@@ -76,7 +97,7 @@ impl Outlet {
     /// Queues an event, or drops and counts it when the queue is full.
     /// Returns `false` once the pipeline is gone, so the source can stop.
     pub fn event(&self, event: Event) -> bool {
-        match self.events.try_send(event) {
+        match self.events.try_send(Queued { event, waited: false }) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 // Dropping events is a blind spot an attacker can cause on
@@ -95,10 +116,11 @@ impl Outlet {
 
     /// Queues an event, waiting while the queue is full instead of dropping
     /// it. For sources that can be slowed down without losing anything
-    /// (journald keeps its entries). Returns `false` once the pipeline is
-    /// gone, so the source can stop.
+    /// (journald keeps its entries). Also waits while these sources hold
+    /// their share of the queue. Returns `false` once the pipeline is gone,
+    /// so the source can stop.
     pub fn wait_and_send(&self, event: Event) -> bool {
-        self.events.send(event).is_ok()
+        self.waiting.send(()).is_ok() && self.events.send(Queued { event, waited: true }).is_ok()
     }
 
     pub fn fail(&self, source: &str, error: String) {
@@ -124,9 +146,28 @@ impl Inlet {
         Arc::clone(&self.dropped)
     }
 
+    /// The next queued event, waiting up to `timeout` for one.
+    fn next(&self, timeout: Duration) -> Result<Event, RecvTimeoutError> {
+        self.events.recv_timeout(timeout).map(|queued| self.taken(queued))
+    }
+
+    /// The next queued event, if there is one already.
+    fn try_next(&self) -> Option<Event> {
+        self.events.try_recv().ok().map(|queued| self.taken(queued))
+    }
+
+    /// Gives a waiting source its slot back once its event left the queue.
+    fn taken(&self, queued: Queued) -> Event {
+        if queued.waited {
+            let _ = self.waiting.try_recv();
+        }
+        queued.event
+    }
+
     /// Empties the queue and returns how many events it held, so stopping
     /// can report them instead of losing them silently. Takes at most one
-    /// queue's worth, as sources may still be adding events.
+    /// queue's worth, as sources may still be adding events. Only for when
+    /// watching ends: waiting sources do not get their slots back.
     pub fn discard_queued(&self) -> usize {
         self.events.try_iter().take(self.capacity).count()
     }
@@ -165,7 +206,7 @@ pub fn drain_reporting<S: AlertSink>(
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
         }
 
-        match inlet.events.recv_timeout(POLL) {
+        match inlet.next(POLL) {
             Ok(event) => {
                 pipeline.process(&event)?;
                 progress(pipeline.stats());
@@ -194,7 +235,7 @@ fn process_backlog<S: AlertSink>(
         if let Ok(Control::Shutdown) = inlet.control.try_recv() {
             return Ok(());
         }
-        let Ok(event) = inlet.events.try_recv() else {
+        let Some(event) = inlet.try_next() else {
             return Ok(());
         };
         pipeline.process(&event)?;
@@ -409,6 +450,64 @@ mod tests {
 
         assert_eq!(reader.join().unwrap(), 2);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    }
+
+    fn udp(secs: i64) -> Event {
+        Event {
+            host: "udp".into(),
+            ..failed(secs)
+        }
+    }
+
+    /// Waits until a sender blocked on a full queue has had time to block.
+    fn settle() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_waiting_source_leaves_room_for_the_sources_that_drop() {
+        let (outlet, inlet) = channel(4);
+        let journald = outlet.clone();
+        std::thread::spawn(move || (0..10).all(|secs| journald.wait_and_send(failed(secs))));
+        settle();
+
+        assert!(outlet.event(udp(0)));
+        assert!(outlet.event(udp(1)));
+
+        assert_eq!(inlet.dropped(), 0, "half the queue stays free for UDP");
+    }
+
+    #[test]
+    fn both_sources_get_through_while_both_flood() {
+        let (outlet, inlet) = channel(4);
+        let journald = outlet.clone();
+        let backlog = std::thread::spawn(move || (0..20).all(|secs| journald.wait_and_send(failed(secs))));
+        let mut hosts: Vec<String> = Vec::new();
+
+        // While journald still has a backlog, UDP sends bursts of its half of
+        // the queue, and the pipeline takes events until it has the burst.
+        for burst in 0..5 {
+            settle();
+            outlet.event(udp(2 * burst));
+            outlet.event(udp(2 * burst + 1));
+            while hosts.iter().filter(|host| *host == "udp").count() < 2 * (burst as usize + 1) {
+                hosts.push(inlet.next(POLL).unwrap().host);
+            }
+        }
+        drop(outlet);
+        // Ends once journald has sent its whole backlog and let go.
+        loop {
+            match inlet.next(POLL) {
+                Ok(event) => hosts.push(event.host),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        assert!(backlog.join().unwrap());
+        assert_eq!(inlet.dropped(), 0);
+        assert_eq!(hosts.iter().filter(|host| *host == "udp").count(), 10);
+        assert_eq!(hosts.iter().filter(|host| *host == "srv01").count(), 20);
     }
 
     #[test]
