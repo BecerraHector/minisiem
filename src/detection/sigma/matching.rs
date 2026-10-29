@@ -84,7 +84,7 @@ mod tests {
             process: "sshd".into(),
             kind,
             user: user.into(),
-            src_ip: src_ip.parse().unwrap(),
+            src_ip: Some(src_ip.parse().unwrap()),
             message: message.into(),
             logsource: LogSource::new("linux", "sshd"),
         }

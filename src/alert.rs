@@ -68,7 +68,8 @@ pub struct Alert {
     pub title: String,
     pub severity: Severity,
     pub techniques: Vec<MitreTechnique>,
-    pub src_ip: IpAddr,
+    /// The source IP of the event behind the alert, when it had one.
+    pub src_ip: Option<IpAddr>,
     pub host: String,
     pub evidence: Evidence,
 }

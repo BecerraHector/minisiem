@@ -123,7 +123,7 @@ mod tests {
                 process: "sshd-session".into(),
                 kind: EventKind::FailedLogin,
                 user: "root".into(),
-                src_ip: "203.0.113.7".parse().unwrap(),
+                src_ip: Some("203.0.113.7".parse().unwrap()),
                 message: "Failed password for root from 203.0.113.7 port 52211 ssh2".into(),
                 logsource: LogSource::new("linux", "sshd"),
             })
@@ -155,7 +155,7 @@ mod tests {
 
         let event = JournalParser.parse(&line).expect("still an sshd event");
 
-        assert_eq!(event.src_ip, "203.0.113.7".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(event.src_ip, Some("203.0.113.7".parse::<std::net::IpAddr>().unwrap()));
         assert_eq!(event.user, "x from 198.51.100.9 port 1");
     }
 

@@ -62,10 +62,17 @@ impl Detector for SigmaEngine {
             for (input, reference) in correlation.inputs.iter().enumerate() {
                 let (group, hit) = match *reference {
                     RuleRef::Detection(i) if matched[i] => {
-                        let group = rule
+                        // An event without a group-by field (e.g. sudo has no
+                        // source IP) belongs to no group: counting it in an
+                        // empty one would lump unrelated events together.
+                        let group: Option<Group> = rule
                             .group_by
                             .iter()
-                            .map(|f| (f.clone(), event.field(f).unwrap_or_default()));
+                            .map(|f| event.field(f).map(|value| (f.clone(), value)))
+                            .collect();
+                        let Some(group) = group else {
+                            continue;
+                        };
                         let hit = Hit {
                             input,
                             timestamp: event.timestamp,
@@ -73,7 +80,7 @@ impl Detector for SigmaEngine {
                             value: counted.and_then(|f| event.field(f)),
                             event_count: 1,
                         };
-                        (group.collect::<Group>(), hit)
+                        (group, hit)
                     }
                     RuleRef::Correlation(i) => {
                         let Some((inner, inner_group)) = &fired[i] else {
@@ -154,7 +161,7 @@ mod tests {
             process: "sshd".into(),
             kind,
             user: user.into(),
-            src_ip: src_ip.parse().unwrap(),
+            src_ip: Some(src_ip.parse().unwrap()),
             message: format!("{} for {user}", kind.as_str()),
             logsource: LogSource::new("linux", "sshd"),
         }
@@ -239,7 +246,7 @@ mod tests {
                     id: "T1110.001".into(),
                     name: None
                 }],
-                src_ip: "203.0.113.7".parse().unwrap(),
+                src_ip: Some("203.0.113.7".parse().unwrap()),
                 host: "srv01".into(),
                 evidence: Evidence::Correlation {
                     group: vec![("src_ip".into(), "203.0.113.7".into())],
@@ -327,6 +334,24 @@ mod tests {
         let alerts = engine.evaluate(&failed("root", "203.0.113.7", 2));
 
         assert_eq!(titles(&alerts), ["Root login", "SSH brute force"]);
+    }
+
+    #[test]
+    fn events_without_a_group_by_field_join_no_group() {
+        let mut engine = engine(&[FAILED, BURST]);
+        let mut no_ip = failed("root", "203.0.113.7", 0);
+        no_ip.src_ip = None;
+
+        // Three failures without a source IP do not form a burst together.
+        for secs in 0..3 {
+            let alerts = engine.evaluate(&Event {
+                timestamp: at(secs),
+                ..no_ip.clone()
+            });
+            assert!(alerts.is_empty(), "alerts: {:?}", titles(&alerts));
+        }
+        // Nor do they count towards one from an IP.
+        assert!(engine.evaluate(&failed("root", "203.0.113.7", 3)).is_empty());
     }
 
     #[test]

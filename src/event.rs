@@ -64,7 +64,8 @@ pub struct Event {
     pub process: String,
     pub kind: EventKind,
     pub user: String,
-    pub src_ip: IpAddr,
+    /// Where the event came from, for sources that know it (sshd).
+    pub src_ip: Option<IpAddr>,
     /// The original log message, without the syslog header.
     pub message: String,
     pub logsource: LogSource,
@@ -80,7 +81,7 @@ impl Event {
             "host" => Some(self.host.clone()),
             "process" => Some(self.process.clone()),
             "user" => Some(self.user.clone()),
-            "src_ip" => Some(self.src_ip.to_string()),
+            "src_ip" => self.src_ip.map(|ip| ip.to_string()),
             "event_kind" => Some(self.kind.as_str().to_string()),
             _ => None,
         }

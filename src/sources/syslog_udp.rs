@@ -263,7 +263,7 @@ mod tests {
             .unwrap();
 
         let event = inlet.next(std::time::Duration::from_secs(5)).unwrap();
-        assert_eq!(event.src_ip.to_string(), "203.0.113.7");
+        assert_eq!(event.src_ip.map(|ip| ip.to_string()).as_deref(), Some("203.0.113.7"));
     }
 
     #[test]

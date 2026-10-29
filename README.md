@@ -223,8 +223,11 @@ in chunks of 10,000 rows so other readers (`search`, `sqlite3`) are never locked
 Detection waits while a prune runs, so the first one on a large database delays startup. Without
 `--retain-days` nothing is deleted.
 
-Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `PRAGMA
-user_version` holds the schema version; minisiem refuses a database with a version it does not know.
+Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `src_ip` is
+`NULL` for events without a source IP. `PRAGMA user_version` holds the schema version (2):
+minisiem refuses a database with a version it does not know. It upgrades a version 1 database
+(where `src_ip` was required) when opening it, rebuilding its tables with every row in one
+transaction, after which older minisiem versions refuse it.
 
 ### Search
 

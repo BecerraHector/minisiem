@@ -287,7 +287,7 @@ mod tests {
             process: "sshd".into(),
             kind: EventKind::FailedLogin,
             user: "root".into(),
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             message: String::new(),
             logsource: LogSource::new("linux", "sshd"),
         }

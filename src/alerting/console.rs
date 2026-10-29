@@ -27,15 +27,12 @@ impl<W: Write> AlertSink for ConsoleSink<W> {
 
 impl<W: Write> ConsoleSink<W> {
     fn write_line(&mut self, alert: &Alert) -> io::Result<()> {
-        write!(
-            self.out,
-            "[{}] {}{} src={} host={}",
-            alert.severity,
-            alert.title,
-            techniques(alert),
-            alert.src_ip,
-            alert.host
-        )?;
+        write!(self.out, "[{}] {}{}", alert.severity, alert.title, techniques(alert),)?;
+        // Left out for sources without one (e.g. sudo).
+        if let Some(src_ip) = alert.src_ip {
+            write!(self.out, " src={src_ip}")?;
+        }
+        write!(self.out, " host={}", alert.host)?;
 
         match &alert.evidence {
             Evidence::Burst {
@@ -97,7 +94,7 @@ impl fmt::Display for EventLine<'_> {
             event.timestamp.to_rfc3339(),
             field_value(&event.host),
             field_value(&event.process),
-            event.src_ip,
+            event.src_ip.map_or("-".to_owned(), |ip| ip.to_string()),
             field_value(&event.user),
             event.kind.as_str(),
             event.message,
@@ -179,7 +176,7 @@ mod tests {
                 id: "T1110.001".into(),
                 name: Some("Password Guessing".into()),
             }],
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             host: "srv01".into(),
             evidence: Evidence::Burst {
                 event_count: 3,
@@ -197,7 +194,7 @@ mod tests {
             process: "sshd".into(),
             kind: EventKind::SuccessfulLogin,
             user: user.into(),
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             message: message.into(),
             logsource: LogSource::new("linux", "sshd"),
         };
@@ -218,6 +215,24 @@ mod tests {
             render(&burst_alert(vec!["admin".into(), "root".into()])),
             "[HIGH] SSH brute force (T1110.001 Password Guessing) src=203.0.113.7 host=srv01 failures=3 \
              users=admin,root first_seen=2026-10-22T10:00:00+00:00 last_seen=2026-10-22T10:01:00+00:00\n"
+        );
+    }
+
+    #[test]
+    fn leaves_the_source_ip_out_when_there_is_none() {
+        let mut alert = event_alert(vec![], "root", "msg");
+        alert.src_ip = None;
+        let Evidence::Event(event) = &mut alert.evidence else {
+            unreachable!()
+        };
+        event.src_ip = None;
+        let line = EventLine(event).to_string();
+
+        assert!(line.contains(" src=- "), "{line}");
+        let rendered = render(&alert);
+        assert!(
+            rendered.starts_with("[MEDIUM] SSH login as root host=srv01 user=root "),
+            "{rendered}"
         );
     }
 
@@ -271,7 +286,7 @@ mod tests {
                 id: "T1087".into(),
                 name: None,
             }],
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             host: "srv01".into(),
             evidence: Evidence::Correlation {
                 group: group.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),

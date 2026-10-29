@@ -96,7 +96,7 @@ pub(super) fn sshd_event(timestamp: DateTime<Utc>, host: &str, process: &str, me
         process: process.to_string(),
         kind,
         user: user.to_string(),
-        src_ip,
+        src_ip: Some(src_ip),
         message: message.to_string(),
         logsource: LogSource::new("linux", "sshd"),
     })
@@ -137,7 +137,7 @@ mod tests {
                 process: "sshd".into(),
                 kind: EventKind::FailedLogin,
                 user: "root".into(),
-                src_ip: "203.0.113.7".parse().unwrap(),
+                src_ip: Some("203.0.113.7".parse().unwrap()),
                 message: "Failed password for root from 203.0.113.7 port 52211 ssh2".into(),
                 logsource: LogSource::new("linux", "sshd"),
             }
@@ -172,7 +172,7 @@ mod tests {
 
         assert_eq!(event.kind, EventKind::SuccessfulLogin);
         assert_eq!(event.user, "hector");
-        assert_eq!(event.src_ip, "192.168.1.10".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(event.src_ip, Some("192.168.1.10".parse::<std::net::IpAddr>().unwrap()));
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
 
         let event = parser().parse(line).unwrap();
 
-        assert_eq!(event.src_ip, "2001:db8::7".parse::<std::net::IpAddr>().unwrap());
+        assert_eq!(event.src_ip, Some("2001:db8::7".parse::<std::net::IpAddr>().unwrap()));
     }
 
     #[test]
@@ -240,7 +240,11 @@ mod tests {
         let event = parser()
             .parse(&format!("Oct 22 10:15:32 srv01 sshd[1]: {message}"))
             .expect("should be an sshd event");
-        (event.kind, event.user, event.src_ip)
+        (
+            event.kind,
+            event.user,
+            event.src_ip.expect("sshd events have a source IP"),
+        )
     }
 
     #[test]
