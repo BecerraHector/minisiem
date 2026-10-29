@@ -344,6 +344,15 @@ mod tests {
     }
 
     #[test]
+    fn quotes_values_with_an_equals_sign_or_a_quote_even_without_spaces() {
+        let equals = render(&event_alert(vec![], "x=src=9.9.9.9", "Invalid user"));
+        let quote = render(&event_alert(vec![], r#"a"b"#, "Invalid user"));
+
+        assert!(equals.contains(r#" user="x=src=9.9.9.9" "#), "{equals}");
+        assert!(quote.contains(r#" user="a\"b" "#), "{quote}");
+    }
+
+    #[test]
     fn quoted_values_still_escape_control_characters() {
         let event = render(&event_alert(vec![], "x \x1b[2J\nfake", "Invalid user"));
 
