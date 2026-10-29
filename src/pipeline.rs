@@ -4,6 +4,7 @@
 
 use std::io::{self, BufRead};
 
+use crate::alert::Alert;
 use crate::alerting::AlertSink;
 use crate::detection::Detector;
 use crate::event::Event;
@@ -16,9 +17,18 @@ pub struct Stats {
     pub alerts: usize,
 }
 
+/// Port: somewhere events and alerts are kept for later search. Writes may
+/// be buffered until [`Archive::flush`].
+pub trait Archive: Send {
+    fn record_event(&mut self, event: &Event) -> io::Result<()>;
+    fn record_alert(&mut self, alert: &Alert) -> io::Result<()>;
+    fn flush(&mut self) -> io::Result<()>;
+}
+
 pub struct Pipeline<S> {
     detectors: Vec<Box<dyn Detector>>,
     sink: S,
+    archive: Option<Box<dyn Archive>>,
     stats: Stats,
 }
 
@@ -27,20 +37,43 @@ impl<S: AlertSink> Pipeline<S> {
         Self {
             detectors,
             sink,
+            archive: None,
             stats: Stats::default(),
         }
     }
 
+    /// Also keeps every event and alert in `archive`, if there is one.
+    pub fn with_archive(mut self, archive: Option<Box<dyn Archive>>) -> Self {
+        self.archive = archive;
+        self
+    }
+
     /// Runs every detector on one event and emits what they raise, in order.
+    /// With an archive, the event and its alerts are archived too.
     pub fn process(&mut self, event: &Event) -> io::Result<()> {
         self.stats.events += 1;
+        if let Some(archive) = &mut self.archive {
+            archive.record_event(event)?;
+        }
         for detector in self.detectors.iter_mut() {
             for alert in detector.evaluate(event) {
                 self.stats.alerts += 1;
                 self.sink.emit(&alert)?;
+                if let Some(archive) = &mut self.archive {
+                    archive.record_alert(&alert)?;
+                }
             }
         }
         Ok(())
+    }
+
+    /// Makes what the archive buffered durable. Without an archive, does
+    /// nothing.
+    pub fn flush_archive(&mut self) -> io::Result<()> {
+        match &mut self.archive {
+            Some(archive) => archive.flush(),
+            None => Ok(()),
+        }
     }
 
     /// Reads `input` to the end, parsing and processing each line.

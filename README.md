@@ -8,11 +8,12 @@ cargo run -- --rules rules tests/fixtures/auth.log
 cargo run -- --threshold 5 --window 60 /var/log/auth.log
 journalctl -o json --no-pager _COMM=sshd-session | cargo run -- --rules rules
 cargo run -- watch --journal --syslog-udp 127.0.0.1:5514 --rules rules
+cargo run -- watch --journal --rules rules --db minisiem.db
 ```
 
 Alerts go to stdout, one per line, flushed as they happen; startup messages and a summary go
 to stderr. Exit codes: `0` success (or watch stopped with Ctrl+C), `1` unreadable input,
-invalid rules or a failed source, `2` invalid arguments.
+invalid rules, a failed source or a database that cannot be written, `2` invalid arguments.
 
 ## Phase 1: SSH brute force detection
 
@@ -194,6 +195,30 @@ Detection is only as good as the events it is fed, and each source can be lied t
 `journalctl` without permission does not fail: it warns and shows only your own entries. Watch
 treats that warning as a failed source instead of running blind.
 
+## Phase 4b: storage
+
+`--db <PATH>`, in batch and watch mode, also keeps every normalized event and every alert in a
+SQLite database, created if missing; an existing one is added to. Without it nothing is stored and
+the output is the same either way.
+
+```sh
+cargo run -- --rules rules --db minisiem.db /var/log/auth.log
+sqlite3 minisiem.db "SELECT time, src_ip, user, kind FROM events WHERE src_ip = '203.0.113.7'"
+```
+
+Writes are grouped in transactions (WAL journal), so a flood does not sync to disk once per event.
+They are committed every 1,000 rows, when watch has no event waiting, and at the end. If the
+database cannot be opened or written, minisiem reports it and exits with code `1`
+(`cannot write to database minisiem.db: ...`): storage failing silently would be a blind spot.
+
+| Table | Columns |
+|-------|---------|
+| `events` | `time`, `host`, `process`, `kind` (as `event_kind`), `user`, `src_ip`, `message`, `product`, `service`, `category` |
+| `alerts` | `time` (the last event behind the alert), `rule_id`, `title`, `severity`, `src_ip`, `host`, `alert` (the whole alert as JSON) |
+
+Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `PRAGMA
+user_version` holds the schema version; minisiem refuses a database with a version it does not know.
+
 ## Architecture
 
 ```
@@ -220,6 +245,7 @@ Ctrl+C / SIGTERM ─────────┘ (shutdown)
 | `rule_loading` | Adapter that loads Sigma rule files from a directory into a validated rule set |
 | `alerting` | `AlertSink` port and the console adapter |
 | `pipeline` | Use case running detectors on events and delivering alerts |
+| `storage` | Adapter keeping events and alerts in SQLite, behind the pipeline's `Archive` port |
 | `sources` | Live source adapters for watch mode (journald, syslog UDP) and the channel they feed |
 
 ## Known limitations
@@ -232,4 +258,6 @@ Ctrl+C / SIGTERM ─────────┘ (shutdown)
 - A UDP flood loses datagrams in the kernel before minisiem reads them (a 300,000-datagram flood on
   a debug build delivered about 25,000): they are counted as `kernel_dropped=N` on Linux, but not
   recovered, and not counted elsewhere.
+- When watch gives up on a blocked stdout, events and alerts not yet committed to the database are
+  lost (at most the ones since watch last had no event waiting).
 - A single group can still hold many entries if one source floods matches within one window.
