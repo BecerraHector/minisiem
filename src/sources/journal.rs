@@ -14,7 +14,8 @@ use crate::ingestion::{JournalParser, LogParser, SSHD_PROCESSES};
 /// Name used in messages about this source.
 const SOURCE: &str = "journald";
 
-/// Overrides the `journalctl` binary (used by tests).
+/// Overrides the `journalctl` binary, which is otherwise looked up in `PATH`
+/// (used by tests; documented in the README).
 pub const JOURNALCTL_ENV: &str = "MINISIEM_JOURNALCTL";
 
 /// A running `journalctl`; dropping it stops the process.
