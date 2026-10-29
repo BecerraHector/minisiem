@@ -1,0 +1,5 @@
+Oct 22 10:15:32 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+Oct 22 10:15:32 srv01 sudo: pam_unix(sudo:session): session opened for user root(uid=0) by hector(uid=1000)
+Oct 22 10:15:40 srv01 sudo:      bob : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/bob ; USER=root ; COMMAND=/bin/bash
+Oct 22 10:15:58 srv01 sudo: pam_unix(sudo:auth): authentication failure; logname=hector uid=1000 euid=0 tty=/dev/pts/0 ruser=hector rhost=  user=hector
+Oct 22 10:16:01 srv01 sudo:   hector : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/id

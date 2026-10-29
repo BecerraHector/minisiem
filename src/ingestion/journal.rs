@@ -7,9 +7,10 @@ use serde_json::{Map, Value};
 
 use super::LogParser;
 use super::sshd::{SSHD_PROCESSES, sshd_event};
+use super::sudo::{SUDO_PROCESS, sudo_event};
 use crate::event::Event;
 
-/// Parses journald JSON entries written by OpenSSH.
+/// Parses journald JSON entries written by OpenSSH or sudo.
 ///
 /// Only fields starting with `_` are set by journald itself; the others
 /// (`SYSLOG_IDENTIFIER`, `MESSAGE`, ...) are chosen by whoever logged the
@@ -30,7 +31,13 @@ impl LogParser for JournalParser {
         let process = entry.get("_COMM")?.as_str()?;
         let executable = entry.get("_EXE")?.as_str()?;
         let uid = entry.get("_UID")?.as_str()?;
-        if !SSHD_PROCESSES.contains(&process) || !is_installed_sshd(executable) || uid != "0" {
+        let sshd = SSHD_PROCESSES.contains(&process) && is_installed(executable, &SSHD_PROCESSES) && uid == "0";
+        // sudo is setuid root, but journald records its real uid, the
+        // invoking user's: the binary's path is what vouches for it. A
+        // setuid binary under /usr/ ignores LD_PRELOAD and cannot be traced
+        // by the user who runs it.
+        let sudo = process == SUDO_PROCESS && is_installed(executable, &[SUDO_PROCESS]);
+        if !sshd && !sudo {
             return None;
         }
         // Microseconds since the epoch, set by journald on reception.
@@ -39,15 +46,18 @@ impl LogParser for JournalParser {
         let host = entry.get("_HOSTNAME").and_then(Value::as_str).unwrap_or_default();
         let message = message_text(entry.get("MESSAGE")?)?;
 
-        sshd_event(timestamp, host, process, &message)
+        match sudo {
+            true => sudo_event(timestamp, host, process, &message),
+            false => sshd_event(timestamp, host, process, &message),
+        }
     }
 }
 
-/// True for an sshd binary under `/usr/`, e.g. `/usr/sbin/sshd` or
-/// `/usr/lib/openssh/sshd-session`. `..` is refused so a path cannot climb
+/// True for a binary named one of `names` under `/usr/`, e.g.
+/// `/usr/sbin/sshd`, `/usr/lib/openssh/sshd-session` or `/usr/bin/sudo`. `..` is refused so a path cannot climb
 /// out of `/usr/`, and so are spellings journald never records (`/./`, `//`,
 /// a trailing `/`).
-fn is_installed_sshd(executable: &str) -> bool {
+fn is_installed(executable: &str, names: &[&str]) -> bool {
     let path = Path::new(executable);
     path.starts_with("/usr")
         && path.components().collect::<PathBuf>().as_os_str() == executable
@@ -57,7 +67,7 @@ fn is_installed_sshd(executable: &str) -> bool {
         && path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| SSHD_PROCESSES.contains(&name))
+            .is_some_and(|name| names.contains(&name))
 }
 
 /// `MESSAGE` is a string, or an array of byte values when it is not valid
@@ -124,10 +134,42 @@ mod tests {
                 kind: EventKind::FailedLogin,
                 user: "root".into(),
                 src_ip: Some("203.0.113.7".parse().unwrap()),
+                target_user: None,
+                command: None,
                 message: "Failed password for root from 203.0.113.7 port 52211 ssh2".into(),
                 logsource: LogSource::new("linux", "sshd"),
             })
         );
+    }
+
+    const SUDO_COMMAND: &str = "  razenk : TTY=pts/1 ; PWD=/home/razenk ; USER=root ; COMMAND=/usr/bin/id";
+
+    #[test]
+    fn parses_a_sudo_entry_logged_as_the_invoking_user() {
+        // sudo is setuid root, but journald records the real uid: the user's.
+        let line = entry_with_uid("sudo", "/usr/bin/sudo", "1000", json!(SUDO_COMMAND));
+
+        let event = JournalParser.parse(&line).unwrap();
+
+        assert_eq!(event.kind, EventKind::SudoCommand);
+        assert_eq!(event.user, "razenk");
+        assert_eq!(event.target_user.as_deref(), Some("root"));
+        assert_eq!(event.logsource, LogSource::new("linux", "sudo"));
+    }
+
+    #[test]
+    fn ignores_sudo_entries_from_other_programs() {
+        for (comm, exe) in [
+            // `logger -t sudo` only sets SYSLOG_IDENTIFIER.
+            ("logger", "/usr/bin/logger"),
+            // A copy where the user can write keeps the name.
+            ("sudo", "/home/mallory/sudo"),
+            ("sudo", "/usr/../home/mallory/sudo"),
+            ("sudo", "/usr/bin/sshd"),
+        ] {
+            let line = entry_with_uid(comm, exe, "1000", json!(SUDO_COMMAND));
+            assert_eq!(JournalParser.parse(&line), None, "{comm} {exe}");
+        }
     }
 
     #[test]
@@ -197,9 +239,9 @@ mod tests {
             "/usr/sbin/sshd/",
             "/usr/sbin/./sshd",
         ] {
-            assert!(!is_installed_sshd(exe), "should be rejected: {exe}");
+            assert!(!is_installed(exe, &SSHD_PROCESSES), "should be rejected: {exe}");
         }
-        assert!(is_installed_sshd("/usr/sbin/sshd"));
+        assert!(is_installed("/usr/sbin/sshd", &SSHD_PROCESSES));
     }
 
     #[test]

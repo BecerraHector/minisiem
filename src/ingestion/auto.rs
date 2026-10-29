@@ -4,21 +4,21 @@ use chrono::FixedOffset;
 
 use super::LogParser;
 use super::journal::JournalParser;
-use super::sshd::SshdParser;
+use super::sshd::SyslogParser;
 use super::syslog_net::to_syslog_line;
 use crate::event::Event;
 
 /// Dispatches on the first character: `{` is a journald JSON entry, `<` a
 /// network syslog message, anything else a syslog line.
 pub struct AutoParser {
-    syslog: SshdParser,
+    syslog: SyslogParser,
 }
 
 impl AutoParser {
     /// `year` and `offset` complete syslog timestamps that lack them.
     pub fn new(year: i32, offset: FixedOffset) -> Self {
         Self {
-            syslog: SshdParser::new(year, offset),
+            syslog: SyslogParser::new(year, offset),
         }
     }
 }
@@ -58,6 +58,20 @@ mod tests {
         assert_eq!(
             (from_journal.kind, from_journal.host.as_str()),
             (EventKind::SuccessfulLogin, "srv02")
+        );
+    }
+
+    #[test]
+    fn parses_sudo_over_network_syslog() {
+        let rfc3164 = "<85>Oct 22 10:15:32 srv01 sudo:     bob : user NOT in sudoers ; TTY=pts/1 ; PWD=/home/bob ; \
+                       USER=root ; COMMAND=/bin/bash";
+        let rfc5424 = "<85>1 2026-10-22T10:15:32Z srv01 sudo - - - \
+                       hector : 3 incorrect password attempts ; TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/id";
+
+        assert_eq!(parser().parse(rfc3164).map(|e| e.kind), Some(EventKind::SudoDenied));
+        assert_eq!(
+            parser().parse(rfc5424).map(|e| e.kind),
+            Some(EventKind::SudoFailedPassword)
         );
     }
 

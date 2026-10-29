@@ -1,7 +1,7 @@
 //! Syslog messages as sent over the network: a `<PRI>` prefix followed by an
 //! RFC 3164 line or an RFC 5424 message.
 
-/// Rewrites a network syslog message as the line format [`super::SshdParser`]
+/// Rewrites a network syslog message as the line format [`super::SyslogParser`]
 /// reads, or `None` if it is not well formed.
 ///
 /// - RFC 3164: `<34>Oct 22 10:15:32 srv01 sshd[1]: msg` loses its `<PRI>`.

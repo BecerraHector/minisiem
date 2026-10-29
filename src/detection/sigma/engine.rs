@@ -162,6 +162,8 @@ mod tests {
             kind,
             user: user.into(),
             src_ip: Some(src_ip.parse().unwrap()),
+            target_user: None,
+            command: None,
             message: format!("{} for {user}", kind.as_str()),
             logsource: LogSource::new("linux", "sshd"),
         }

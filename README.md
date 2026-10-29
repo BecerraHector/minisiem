@@ -36,7 +36,7 @@ Example rules live in [`rules/`](rules/) and are exercised by the CLI tests.
 | Feature | Supported |
 |---------|-----------|
 | Metadata | `title` (required), `id`, `name`, `level`, `tags` (`attack.tNNNN[.NNN]` become techniques); other keys are ignored |
-| `logsource` | `product`, `service`, `category`; sshd events are `product: linux`, `service: sshd` |
+| `logsource` | `product`, `service`, `category`; sshd events are `product: linux`, `service: sshd`; sudo events `product: linux`, `service: sudo` |
 | Searches | map (all fields must match), list of maps (any), list of keywords (substring of the raw message) |
 | Values | case-insensitive, `*` and `?` wildcards (`\*`, `\?`, `\\` escape them), lists (any), `null` (empty field) |
 | Modifiers | `contains`, `startswith`, `endswith`, `all`, `re` (case-sensitive, linear-time), `cidr` |
@@ -48,12 +48,16 @@ Example rules live in [`rules/`](rules/) and are exercised by the CLI tests.
 | Field | Example |
 |-------|---------|
 | `host` | `srv01` |
-| `process` | `sshd`, `sshd-session` |
-| `user` | `root` |
-| `src_ip` | `203.0.113.7`, `2001:db8::7` |
-| `event_kind` | `failed_login`, `invalid_user`, `successful_login` |
+| `process` | `sshd`, `sshd-session`, `sudo` |
+| `user` | `root` (for sudo, who ran it) |
+| `src_ip` | `203.0.113.7`, `2001:db8::7` (sshd only; empty for sudo, so `src_ip: null` matches sudo events) |
+| `event_kind` | `failed_login`, `invalid_user`, `successful_login`, `sudo_command`, `sudo_denied` (not in sudoers, or command not allowed), `sudo_failed_password` |
+| `target_user` | `root` (sudo's `USER=`) |
+| `command` | `/usr/bin/systemctl restart nginx` (sudo's `COMMAND=`) |
 
-Keyword searches match the raw sshd message (e.g. `Accepted password for root from ...`).
+Keyword searches match the raw message (e.g. `Accepted password for root from ...`, or
+`user NOT in sudoers`). sudo's pam_unix lines are not events: its `N incorrect password attempts`
+summary already reports the failure.
 
 ## Phase 3: Sigma correlation rules
 
@@ -137,7 +141,7 @@ the same detection options as batch mode and at least one source:
 
 | Source | What it does |
 |--------|--------------|
-| `--journal` | Runs `journalctl --follow --output=json --lines=0` for the `sshd`, `sshd-session` and `sshd-auth` processes. Needs permission to read the system journal (root or the `systemd-journal` group). |
+| `--journal` | Runs `journalctl --follow --output=json --lines=0` for the `sshd`, `sshd-session`, `sshd-auth` and `sudo` processes. Needs permission to read the system journal (root or the `systemd-journal` group). |
 | `--syslog-udp <ADDR>` | Receives syslog datagrams on `ADDR`, e.g. `127.0.0.1:5514`. One datagram is one message, up to 8 KiB. |
 
 `--journal` runs the `journalctl` found in `PATH`, or the program named by the
@@ -190,6 +194,7 @@ Detection is only as good as the events it is fed, and each source can be lied t
 | Source | Who can forge an sshd event | What minisiem does |
 |--------|-----------------------------|--------------------|
 | journald | Forging a whole entry takes code running as root. The content of genuine entries is still partly remote input: sshd logs the username a client sends unescaped, so a crafted name can add a second `from <ip>` to the message. For invalid users minisiem reads the source IP after the username; for valid users, whose names a client cannot choose, it reads it before the key or hostbased details sshd may append (which can hold a certificate ID or host name the client chose). A crafted name cannot move it, and alerts quote values that contain spaces, `=`, `,` or `"`. Parsing is the same for every source | Requires `_COMM` to be an sshd process, `_EXE` to be an sshd binary under `/usr/` **and** `_UID` to be `0`. This stops `logger -t sshd` (`SYSLOG_IDENTIFIER`), binaries copied to `~/sshd` (`_COMM` alone) and installed sshd binaries started by a user with a preloaded library (`LD_PRELOAD`), which journald records with that user's `_UID`. sshd logs failed, invalid and accepted logins from its privileged monitor, which runs as root; an sshd run by another user (e.g. rootless containers) is ignored |
+| journald (sudo) | Same as above for whole entries. Who runs sudo chooses the directory it runs in (`PWD`) and the command's arguments, so a crafted directory name such as `x ; USER=nobody ; COMMAND=/usr/bin/true` can fake the target user. The command is read from the first `COMMAND=` to the end of the line, so the command that really ran always ends it, and rules should match it with `endswith`/`contains`; the event kind and the invoking user cannot be faked this way | Requires `_COMM` to be `sudo` and `_EXE` a `sudo` binary under `/usr/`. `_UID` is not checked: sudo is setuid root, but journald records the invoking user's uid. A setuid binary ignores `LD_PRELOAD` and cannot be traced by the user running it, and `logger -t sudo` (`_COMM=logger`) or a copy outside `/usr/` is ignored |
 | syslog files | Any local user, with `logger -t sshd "Failed password ..."` | Nothing can tell them apart in plain text; prefer journald |
 | syslog over UDP | Anyone who can reach the port, with any host name and timestamp | Binds loopback only unless `--allow-remote-syslog`; timestamps events on arrival so a forged date cannot reset detection windows |
 
@@ -214,7 +219,7 @@ database cannot be opened or written, minisiem reports it and exits with code `1
 
 | Table | Columns |
 |-------|---------|
-| `events` | `time`, `host`, `process`, `kind` (as `event_kind`), `user`, `src_ip`, `message`, `product`, `service`, `category` |
+| `events` | `time`, `host`, `process`, `kind` (as `event_kind`), `user`, `src_ip`, `message`, `product`, `service`, `category`, `target_user`, `command` |
 | `alerts` | `time` (the last event behind the alert), `rule_id`, `title`, `severity`, `src_ip`, `host`, `alert` (the whole alert as JSON) |
 
 `watch --db <PATH> --retain-days <N>` deletes the events and alerts more than `N` days old (by
@@ -224,10 +229,11 @@ Detection waits while a prune runs, so the first one on a large database delays 
 `--retain-days` nothing is deleted.
 
 Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `src_ip` is
-`NULL` for events without a source IP. `PRAGMA user_version` holds the schema version (2):
-minisiem refuses a database with a version it does not know. It upgrades a version 1 database
-(where `src_ip` was required) when opening it, rebuilding its tables with every row in one
-transaction, after which older minisiem versions refuse it.
+`NULL` for events without a source IP, and `target_user` and `command` are `NULL` for sshd events.
+`PRAGMA user_version` holds the schema version (3): minisiem refuses a database with a version it
+does not know. It upgrades older databases when opening them, in one transaction, after which
+older minisiem versions refuse them: version 1 (where `src_ip` was required) has its tables rebuilt
+with every row, and version 2 gets the `target_user` and `command` columns.
 
 ### Search
 

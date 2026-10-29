@@ -195,6 +195,8 @@ mod tests {
             kind: EventKind::SuccessfulLogin,
             user: user.into(),
             src_ip: Some("203.0.113.7".parse().unwrap()),
+            target_user: None,
+            command: None,
             message: message.into(),
             logsource: LogSource::new("linux", "sshd"),
         };

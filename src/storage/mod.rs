@@ -18,7 +18,7 @@ use crate::event::{Event, EventKind, LogSource};
 use crate::pipeline::Archive;
 
 /// The schema this version of minisiem writes, kept in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Rows written before the open transaction is committed on its own.
 const BATCH: usize = 1_000;
@@ -45,7 +45,9 @@ CREATE TABLE events (
     message  TEXT NOT NULL,
     product  TEXT,
     service  TEXT,
-    category TEXT
+    category TEXT,
+    target_user TEXT,
+    command  TEXT
 );
 CREATE INDEX events_time ON events (time);
 CREATE INDEX events_src_ip ON events (src_ip, time);
@@ -69,6 +71,14 @@ CREATE INDEX alerts_host ON alerts (host, time);
 
 fn user_version(connection: &Connection) -> rusqlite::Result<i64> {
     connection.pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
+/// Version 2 had no columns for sudo's target user and command.
+fn upgrade_from_2(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "ALTER TABLE events ADD COLUMN target_user TEXT;
+         ALTER TABLE events ADD COLUMN command TEXT;",
+    )
 }
 
 /// Version 1 required `src_ip`. SQLite cannot drop a NOT NULL constraint,
@@ -192,6 +202,8 @@ impl Store {
                 .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
             1 => upgrade_from_1(&connection)
                 .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
+            2 => upgrade_from_2(&connection)
+                .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
             SCHEMA_VERSION => Ok(()),
             other => {
                 connection.execute_batch("ROLLBACK")?;
@@ -217,7 +229,7 @@ impl Store {
     pub fn events(&self, filter: &Filter) -> Result<Vec<Event>> {
         let (conditions, values) = filter.sql(true)?;
         let mut statement = self.connection.prepare(&format!(
-            "SELECT time, host, process, kind, user, src_ip, message, product, service, category
+            "SELECT time, host, process, kind, user, src_ip, message, product, service, category, target_user, command
              FROM events {conditions} ORDER BY time, id"
         ))?;
         let rows = statement.query_map(params_from_iter(values), |row| Ok(event_from_row(row)))?;
@@ -240,8 +252,9 @@ impl Store {
         self.begin()?;
         self.connection
             .prepare_cached(
-                "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category,
+                                     target_user, command)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?
             .execute(params![
                 time_text(event.timestamp),
@@ -254,6 +267,8 @@ impl Store {
                 event.logsource.product,
                 event.logsource.service,
                 event.logsource.category,
+                event.target_user,
+                event.command,
             ])?;
         self.written()
     }
@@ -446,6 +461,8 @@ fn event_from_row(row: &Row) -> Result<Event> {
             None => None,
             Some(ip) => Some(ip.parse().map_err(|_| corrupt("src_ip", &ip))?),
         },
+        target_user: row.get(10)?,
+        command: row.get(11)?,
         message: row.get(6)?,
         logsource: LogSource {
             product: row.get(7)?,
@@ -520,6 +537,8 @@ mod tests {
             kind: EventKind::FailedLogin,
             user: "root".into(),
             src_ip: Some("203.0.113.7".parse().unwrap()),
+            target_user: None,
+            command: None,
             message: "Failed password for root from 203.0.113.7 port 1 ssh2".into(),
             logsource: LogSource::new("linux", "sshd"),
         }
@@ -689,6 +708,71 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tables, 1, "search must not create the schema");
+    }
+
+    fn sudo_event() -> Event {
+        Event {
+            process: "sudo".into(),
+            kind: EventKind::SudoCommand,
+            user: "hector".into(),
+            src_ip: None,
+            target_user: Some("root".into()),
+            command: Some("/usr/bin/id".into()),
+            message: "hector : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/id".into(),
+            logsource: LogSource::new("linux", "sudo"),
+            ..event(7)
+        }
+    }
+
+    #[test]
+    fn keeps_the_target_user_and_command_of_sudo_events() {
+        let (_dir, path) = temp_db();
+        let mut store = Store::open(&path).unwrap();
+        let alert = Alert {
+            src_ip: None,
+            evidence: Evidence::Event(sudo_event()),
+            ..burst()
+        };
+
+        store.record_event(&sudo_event()).unwrap();
+        store.record_alert(&alert).unwrap();
+        store.flush().unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [sudo_event()]);
+        assert_eq!(store.alerts(&Filter::default()).unwrap(), [alert]);
+        let columns: (String, String) = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT target_user, command FROM events", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(columns, ("root".into(), "/usr/bin/id".into()));
+    }
+
+    #[test]
+    fn upgrades_a_version_2_database_keeping_its_rows() {
+        let (_dir, path) = temp_db();
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            &SCHEMA_V1
+                .replace("src_ip TEXT NOT NULL", "src_ip TEXT")
+                .replace("user_version = 1", "user_version = 2"),
+        )
+        .unwrap();
+        old.execute_batch(
+            "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category)
+             VALUES ('2026-10-22T10:00:05.000000Z', 'srv01', 'sshd', 'failed_login', 'root', '203.0.113.7',
+                     'Failed password for root from 203.0.113.7 port 1 ssh2', 'linux', 'sshd', NULL);",
+        )
+        .unwrap();
+        drop(old);
+
+        let mut store = Store::open(&path).unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event(5)]);
+        store.record_event(&sudo_event()).unwrap();
+        store.flush().unwrap();
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event(5), sudo_event()]);
     }
 
     #[test]
@@ -889,7 +973,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unknown database schema version 99 (this minisiem writes version 2)"
+            "unknown database schema version 99 (this minisiem writes version 3)"
         );
     }
 

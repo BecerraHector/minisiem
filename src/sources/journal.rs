@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::Outlet;
-use crate::ingestion::{JournalParser, LogParser, SSHD_PROCESSES};
+use crate::ingestion::{FOLLOWED_PROCESSES, JournalParser, LogParser};
 
 /// Name used in messages about this source.
 const SOURCE: &str = "journald";
@@ -89,7 +89,7 @@ fn stop_and_explain(result: io::Result<Ended>, child: &Mutex<Child>, relay: Join
     }
 }
 
-/// `journalctl` following new entries of OpenSSH processes only. The match
+/// `journalctl` following new entries of OpenSSH processes and sudo only. The match
 /// is on `_COMM`, which journald sets itself: `--identifier=sshd` would
 /// match `SYSLOG_IDENTIFIER`, which any process can claim.
 ///
@@ -100,7 +100,7 @@ fn stop_and_explain(result: io::Result<Ended>, child: &Mutex<Child>, relay: Join
 fn journalctl_command(program: OsString) -> Command {
     let mut command = Command::new(program);
     command.args(["--follow", "--output=json", "--lines=0", "--no-pager"]);
-    command.args(SSHD_PROCESSES.iter().map(|process| format!("_COMM={process}")));
+    command.args(FOLLOWED_PROCESSES.iter().map(|process| format!("_COMM={process}")));
     command.process_group(0);
     command
 }
@@ -151,7 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn follows_only_new_entries_of_sshd_processes_by_trusted_field() {
+    fn follows_only_new_entries_of_sshd_and_sudo_by_trusted_field() {
         let command = journalctl_command("journalctl".into());
         let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
 
@@ -163,6 +163,7 @@ mod tests {
             "_COMM=sshd",
             "_COMM=sshd-session",
             "_COMM=sshd-auth",
+            "_COMM=sudo",
         ] {
             assert!(args.contains(&expected.to_string()), "missing {expected} in {args:?}");
         }
