@@ -102,13 +102,14 @@ fn journalctl_command(program: OsString) -> Command {
     command
 }
 
-/// Sends every sshd event found in `reader` until it ends.
+/// Sends every sshd event found in `reader` until it ends. Waits when the
+/// queue is full: journalctl then waits too, and journald keeps the entries.
 fn forward_events(mut reader: impl BufRead, outlet: &Outlet) -> io::Result<()> {
     let mut buf = Vec::new();
     while reader.read_until(b'\n', &mut buf)? > 0 {
         let line = String::from_utf8_lossy(&buf);
         if let Some(event) = JournalParser.parse(line.trim_end())
-            && !outlet.event(event)
+            && !outlet.wait_and_send(event)
         {
             return Ok(());
         }
@@ -172,6 +173,24 @@ mod tests {
             11,
             "10 failures and 1 login; spoofed and unrelated entries skipped"
         );
+    }
+
+    #[test]
+    fn waits_for_room_instead_of_dropping_when_the_queue_is_full() {
+        // journald keeps its entries, so slowing journalctl down loses nothing.
+        let journal = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json")).unwrap();
+        let (outlet, inlet) = super::super::channel(2);
+        let dropped = inlet.dropped_counter();
+        let reader = thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(100));
+            inlet.events.iter().count()
+        });
+
+        forward_events(journal.as_slice(), &outlet).unwrap();
+        drop(outlet);
+
+        assert_eq!(reader.join().unwrap(), 11);
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -50,6 +50,7 @@ pub struct Inlet {
     events: Receiver<Event>,
     control: Receiver<Control>,
     dropped: Arc<AtomicU64>,
+    capacity: usize,
 }
 
 pub fn channel(capacity: usize) -> (Outlet, Inlet) {
@@ -66,6 +67,7 @@ pub fn channel(capacity: usize) -> (Outlet, Inlet) {
             events: event_rx,
             control: control_rx,
             dropped,
+            capacity,
         },
     )
 }
@@ -91,6 +93,14 @@ impl Outlet {
         }
     }
 
+    /// Queues an event, waiting while the queue is full instead of dropping
+    /// it. For sources that can be slowed down without losing anything
+    /// (journald keeps its entries). Returns `false` once the pipeline is
+    /// gone, so the source can stop.
+    pub fn wait_and_send(&self, event: Event) -> bool {
+        self.events.send(event).is_ok()
+    }
+
     pub fn fail(&self, source: &str, error: String) {
         let _ = self.control.send(Control::Failed {
             source: source.to_string(),
@@ -112,6 +122,13 @@ impl Inlet {
     /// The live count behind [`Inlet::dropped`], readable from another thread.
     pub fn dropped_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.dropped)
+    }
+
+    /// Empties the queue and returns how many events it held, so stopping
+    /// can report them instead of losing them silently. Takes at most one
+    /// queue's worth, as sources may still be adding events.
+    pub fn discard_queued(&self) -> usize {
+        self.events.try_iter().take(self.capacity).count()
     }
 }
 
@@ -141,7 +158,10 @@ pub fn drain_reporting<S: AlertSink>(
         // backlog to be processed.
         match inlet.control.try_recv() {
             Ok(Control::Shutdown) => return Ok(Stop::Interrupted),
-            Ok(Control::Failed { source, error }) => return Ok(Stop::SourceFailed { source, error }),
+            Ok(Control::Failed { source, error }) => {
+                process_backlog(inlet, pipeline, &mut progress)?;
+                return Ok(Stop::SourceFailed { source, error });
+            }
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
         }
 
@@ -159,6 +179,28 @@ pub fn drain_reporting<S: AlertSink>(
             }
         }
     }
+}
+
+/// Processes the events already queued when a source failed: the last ones
+/// before it died may be the most relevant. Ctrl+C still stops at once, and
+/// at most one queue's worth is processed, as other sources keep adding.
+fn process_backlog<S: AlertSink>(
+    inlet: &Inlet,
+    pipeline: &mut Pipeline<S>,
+    progress: &mut impl FnMut(Stats),
+) -> io::Result<()> {
+    for _ in 0..inlet.capacity {
+        // Another source failing too changes nothing: watching ends anyway.
+        if let Ok(Control::Shutdown) = inlet.control.try_recv() {
+            return Ok(());
+        }
+        let Ok(event) = inlet.events.try_recv() else {
+            return Ok(());
+        };
+        pipeline.process(&event)?;
+        progress(pipeline.stats());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -304,5 +346,77 @@ mod tests {
         drop(inlet);
 
         assert!(!outlet.event(failed(0)));
+    }
+
+    fn quiet_pipeline() -> Pipeline<crate::alerting::ConsoleSink<io::Sink>> {
+        Pipeline::new(vec![], crate::alerting::ConsoleSink::new(io::sink()))
+    }
+
+    #[test]
+    fn processes_queued_events_before_reporting_a_failed_source() {
+        // The last events before a source dies may be the most relevant.
+        let (outlet, inlet) = channel(10);
+        for secs in 0..3 {
+            outlet.event(failed(secs));
+        }
+        outlet.fail("journald", "journalctl exited".into());
+        let mut pipeline = quiet_pipeline();
+
+        let stop = drain(&inlet, &mut pipeline).unwrap();
+
+        assert!(matches!(stop, Stop::SourceFailed { .. }));
+        assert_eq!(pipeline.stats().events, 3);
+    }
+
+    #[test]
+    fn ctrl_c_still_cuts_the_backlog_of_a_failed_source_short() {
+        let (outlet, inlet) = channel(10);
+        for secs in 0..5 {
+            outlet.event(failed(secs));
+        }
+        outlet.fail("journald", "journalctl exited".into());
+        // Asks to stop after the first alert, raised by the second event.
+        let mut pipeline = pipeline(&outlet);
+
+        let stop = drain(&inlet, &mut pipeline).unwrap();
+
+        assert!(matches!(stop, Stop::SourceFailed { .. }), "the source did fail");
+        assert_eq!(pipeline.stats().events, 2);
+    }
+
+    #[test]
+    fn counts_and_discards_the_events_left_in_the_queue() {
+        let (outlet, inlet) = channel(10);
+        for secs in 0..4 {
+            outlet.event(failed(secs));
+        }
+
+        assert_eq!(inlet.discard_queued(), 4);
+        assert_eq!(inlet.discard_queued(), 0);
+    }
+
+    #[test]
+    fn a_source_that_can_wait_loses_nothing_when_the_queue_is_full() {
+        let (outlet, inlet) = channel(1);
+        assert!(outlet.event(failed(0)));
+        let dropped = inlet.dropped_counter();
+        let reader = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            inlet.events.iter().take(2).count()
+        });
+
+        assert!(outlet.wait_and_send(failed(1)), "waits for space instead of dropping");
+
+        assert_eq!(reader.join().unwrap(), 2);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_waiting_source_learns_when_the_pipeline_is_gone() {
+        let (outlet, inlet) = channel(1);
+        outlet.event(failed(0));
+        drop(inlet);
+
+        assert!(!outlet.wait_and_send(failed(1)));
     }
 }
