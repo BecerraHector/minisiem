@@ -67,6 +67,10 @@ CREATE INDEX alerts_src_ip ON alerts (src_ip, time);
 CREATE INDEX alerts_host ON alerts (host, time);
 ";
 
+fn user_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
 /// Version 1 required `src_ip`. SQLite cannot drop a NOT NULL constraint,
 /// so the tables are rebuilt with every row. Runs inside the version check's
 /// transaction: a crash leaves version 1 intact.
@@ -155,17 +159,35 @@ impl Store {
     /// Opens the database at `path`, creating it and its schema if needed.
     /// Refuses a database written with an unknown schema version.
     pub fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        Self::prepare(Connection::open(path)?, path, true)
+    }
+
+    /// Opens an existing database to search it, upgrading it like
+    /// [`Store::open`]. Unlike it, a missing file is an error, not a new
+    /// database, and a database minisiem did not create is left untouched.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)?;
+        // Checked before anything below changes the file (e.g. its journal).
+        if user_version(&connection)? == 0 {
+            return Err(StoreError::UnknownSchema(0));
+        }
+        Self::prepare(connection, path, false)
+    }
+
+    /// Sets the connection up and brings the schema to [`SCHEMA_VERSION`],
+    /// creating it in an empty database if `create`.
+    fn prepare(connection: Connection, path: &Path, create: bool) -> Result<Self> {
         // Another process may hold the file (e.g. creating it): wait for it.
         connection.busy_timeout(BUSY_TIMEOUT)?;
         enable_wal(&connection)?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        // The version is read and the schema created in one write
-        // transaction: a crash leaves no half-created schema, and of several
+        // The version is read and the schema created or upgraded in one write
+        // transaction: a crash leaves no half-done schema, and of several
         // processes opening a new file, one creates it and the others see it.
         connection.execute_batch("BEGIN IMMEDIATE")?;
-        let created = match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-            0 => connection
+        let created = match user_version(&connection)? {
+            0 if create => connection
                 .execute_batch(SCHEMA)
                 .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
             1 => upgrade_from_1(&connection)
@@ -189,23 +211,6 @@ impl Store {
             pending: None,
             retention: None,
         })
-    }
-
-    /// Opens an existing database to search it. Unlike [`Store::open`], a
-    /// missing file is an error, not a new database.
-    pub fn open_existing(path: &Path) -> Result<Self> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let connection = Connection::open_with_flags(path, flags)?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-            SCHEMA_VERSION => Ok(Self {
-                connection,
-                path: path.to_owned(),
-                pending: None,
-                retention: None,
-            }),
-            other => Err(StoreError::UnknownSchema(other)),
-        }
     }
 
     /// The events matching `filter`, oldest first.
@@ -643,6 +648,47 @@ mod tests {
             })
             .unwrap();
         store.flush().unwrap();
+    }
+
+    #[test]
+    fn search_upgrades_a_version_1_database_too() {
+        let (_dir, path) = temp_db();
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(SCHEMA_V1).unwrap();
+        old.execute_batch(
+            "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category)
+             VALUES ('2026-10-22T10:00:05.000000Z', 'srv01', 'sshd', 'failed_login', 'root', '203.0.113.7',
+                     'Failed password for root from 203.0.113.7 port 1 ssh2', 'linux', 'sshd', NULL);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open_existing(&path).unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event(5)]);
+    }
+
+    #[test]
+    fn search_refuses_a_database_minisiem_did_not_create() {
+        let (_dir, path) = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x);")
+            .unwrap();
+
+        let error = Store::open_existing(&path).err().unwrap();
+
+        assert!(
+            error.to_string().starts_with("unknown database schema version 0"),
+            "{error}"
+        );
+        let tables: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(tables, 1, "search must not create the schema");
     }
 
     #[test]
