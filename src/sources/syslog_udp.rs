@@ -2,6 +2,7 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -54,7 +55,11 @@ impl SyslogUdp {
                 SocketAddr::V4(_) => "/proc/net/udp",
                 SocketAddr::V6(_) => "/proc/net/udp6",
             };
-            let drops = KernelDrops { inode: fd.ino(), table };
+            let drops = KernelDrops {
+                inode: fd.ino(),
+                table,
+                _socket: Arc::new(self.socket.try_clone().ok()?),
+            };
             drops.count().map(|_| drops)
         }
         #[cfg(not(target_os = "linux"))]
@@ -113,6 +118,8 @@ impl SyslogUdp {
 pub struct KernelDrops {
     inode: u64,
     table: &'static str,
+    /// Keeps the socket, and so its counter, alive once the reader is gone.
+    _socket: Arc<UdpSocket>,
 }
 
 impl KernelDrops {
@@ -230,6 +237,7 @@ mod tests {
         assert_eq!(drops_for_inode(table, 1), None, "not this socket");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn counts_the_datagrams_the_kernel_drops_on_a_full_buffer() {
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
@@ -238,7 +246,7 @@ mod tests {
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
         // Nobody reads: the receive buffer fills and the kernel drops the rest.
-        let sent = 5_000;
+        let sent = 20_000;
         for _ in 0..sent {
             sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
         }
@@ -249,5 +257,21 @@ mod tests {
         let dropped = drops.count().unwrap();
         assert!(dropped > 0, "the flood overflowed the buffer");
         assert_eq!(received + dropped, sent, "every datagram is either read or counted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn keeps_counting_after_the_reader_closed_its_socket() {
+        // The reader stops once the pipeline is gone, before the summary.
+        let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
+        let drops = udp.kernel_drops().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..20_000 {
+            sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
+        }
+
+        drop(udp);
+
+        assert!(drops.count().is_some_and(|count| count > 0));
     }
 }

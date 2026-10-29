@@ -141,6 +141,7 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
@@ -163,17 +164,19 @@ fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
         sender.send_to(frame.as_bytes(), &addr).unwrap();
     }
 
-    let warning = next_line(&stderr);
-    assert_eq!(
-        warning,
-        format!(
-            "minisiem: warning: the kernel is dropping datagrams sent to udp://{addr}: they arrive faster than \
-             minisiem reads them, possibly because of a flood"
-        )
+    // The queue may fill too, and its warning may come first.
+    let warning = format!(
+        "minisiem: warning: the kernel is dropping datagrams sent to udp://{addr}: they arrive faster than \
+         minisiem reads them, possibly because of a flood"
     );
+    std::iter::repeat_with(|| next_line(&stderr))
+        .find(|line| *line == warning)
+        .unwrap();
     interrupt(&child);
     assert_eq!(child.wait().unwrap().code(), Some(0));
-    let summary = next_line(&stderr);
+    let summary = std::iter::repeat_with(|| next_line(&stderr))
+        .find(|line| line.starts_with("minisiem: watch: "))
+        .unwrap();
     let kernel_dropped: u64 = summary
         .split_once(" kernel_dropped=")
         .and_then(|(_, n)| n.split(' ').next()?.parse().ok())
