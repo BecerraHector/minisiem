@@ -20,6 +20,9 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Rows written before the open transaction is committed on its own.
 const BATCH: usize = 1_000;
 
+/// How long to wait for another process holding the database.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 const SCHEMA: &str = "
 CREATE TABLE events (
     id       INTEGER PRIMARY KEY,
@@ -103,15 +106,30 @@ impl Store {
     /// Refuses a database written with an unknown schema version.
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)?;
-        connection.pragma_update(None, "journal_mode", "WAL")?;
+        // Another process may hold the file (e.g. creating it): wait for it.
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        enable_wal(&connection)?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-            0 => {
-                connection.execute_batch(SCHEMA)?;
-                connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // The version is read and the schema created in one write
+        // transaction: a crash leaves no half-created schema, and of several
+        // processes opening a new file, one creates it and the others see it.
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let created = match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
+            0 => connection
+                .execute_batch(SCHEMA)
+                .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
+            SCHEMA_VERSION => Ok(()),
+            other => {
+                connection.execute_batch("ROLLBACK")?;
+                return Err(StoreError::UnknownSchema(other));
             }
-            SCHEMA_VERSION => {}
-            other => return Err(StoreError::UnknownSchema(other)),
+        };
+        match created {
+            Ok(()) => connection.execute_batch("COMMIT")?,
+            Err(e) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                return Err(e.into());
+            }
         }
         Ok(Self {
             connection,
@@ -165,8 +183,10 @@ impl Store {
 
     /// Commits what was written so far.
     pub fn flush(&mut self) -> Result<()> {
-        if self.pending.take().is_some() {
+        if self.pending.is_some() {
+            // Still pending if COMMIT fails, so a later flush can retry it.
             self.connection.execute_batch("COMMIT")?;
+            self.pending = None;
         }
         Ok(())
     }
@@ -193,6 +213,28 @@ impl Drop for Store {
     fn drop(&mut self) {
         // Best effort: callers that need to know flush themselves.
         let _ = self.flush();
+    }
+}
+
+/// Switches the database to the WAL journal, which persists in the file.
+/// Two processes switching a new file at once make SQLite report it locked
+/// at once, without waiting: retry until one of them has switched it.
+fn enable_wal(connection: &Connection) -> rusqlite::Result<()> {
+    let deadline = std::time::Instant::now() + BUSY_TIMEOUT;
+    loop {
+        let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode.eq_ignore_ascii_case("wal") {
+            return Ok(());
+        }
+        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get::<_, String>(0)) {
+            Ok(_) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -398,6 +440,25 @@ mod tests {
             .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn processes_opening_a_new_database_together_all_succeed() {
+        // Two watches started at once on the same new file: one creates the
+        // schema, the others must find it rather than create it again.
+        for _ in 0..20 {
+            let (_dir, path) = temp_db();
+            let openers: Vec<_> = (0..4)
+                .map(|_| {
+                    let path = path.clone();
+                    std::thread::spawn(move || Store::open(&path).map(|_| ()).map_err(|e| e.to_string()))
+                })
+                .collect();
+
+            for opener in openers {
+                assert_eq!(opener.join().unwrap(), Ok(()));
+            }
+        }
     }
 
     #[test]
