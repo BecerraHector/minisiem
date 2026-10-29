@@ -163,16 +163,18 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
 }
 
-/// Starts `watch --syslog-udp` with `MINISIEM_TEST_PANIC` set to `panic`,
-/// sends it one sshd failure and returns it with its stderr lines.
-fn watch_one_event_with_test_panic(panic: &str) -> (Child, Receiver<String>) {
+/// Starts `watch --syslog-udp --threshold 1` with `MINISIEM_TEST_PANIC` set
+/// to `panic`, sends it one sshd failure and returns it with its stdout and
+/// stderr lines.
+fn watch_one_event_with_test_panic(panic: &str) -> (Child, Receiver<String>, Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
-        .args(["watch", "--syslog-udp", "127.0.0.1:0"])
+        .args(["watch", "--syslog-udp", "127.0.0.1:0", "--threshold", "1"])
         .env("MINISIEM_TEST_PANIC", panic)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let stdout = lines_of(child.stdout.take().unwrap());
     let stderr = lines_of(child.stderr.take().unwrap());
     let listening = next_line(&stderr);
     let addr = listening
@@ -187,12 +189,12 @@ fn watch_one_event_with_test_panic(panic: &str) -> (Child, Receiver<String>) {
             &addr,
         )
         .unwrap();
-    (child, stderr)
+    (child, stdout, stderr)
 }
 
 #[test]
 fn watch_exits_with_101_when_detection_panics() {
-    let (mut child, stderr) = watch_one_event_with_test_panic("1");
+    let (mut child, _stdout, stderr) = watch_one_event_with_test_panic("1");
     let status = wait_at_most(&mut child, Duration::from_secs(10));
 
     assert_eq!(status.map(|s| s.code()), Some(Some(101)), "a panic must not hang watch");
@@ -204,8 +206,10 @@ fn watch_exits_with_101_when_detection_panics() {
 #[test]
 fn watch_ignores_a_test_panic_variable_not_set_to_1() {
     for value in ["", "0"] {
-        let (mut child, stderr) = watch_one_event_with_test_panic(value);
-        thread::sleep(Duration::from_millis(500));
+        let (mut child, stdout, stderr) = watch_one_event_with_test_panic(value);
+        // The alert shows the event went through detection without a panic.
+        let alert = next_line(&stdout);
+        assert!(alert.contains("src=203.0.113.7"), "{alert}");
 
         interrupt(&child);
         assert_eq!(
@@ -213,7 +217,7 @@ fn watch_ignores_a_test_panic_variable_not_set_to_1() {
             Some(Some(0)),
             "MINISIEM_TEST_PANIC={value:?}"
         );
-        assert_eq!(next_line(&stderr), "minisiem: watch: events=1 alerts=0");
+        assert_eq!(next_line(&stderr), "minisiem: watch: events=1 alerts=1");
     }
 }
 
