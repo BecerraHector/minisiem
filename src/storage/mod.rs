@@ -18,7 +18,7 @@ use crate::event::{Event, EventKind, LogSource};
 use crate::pipeline::Archive;
 
 /// The schema this version of minisiem writes, kept in `PRAGMA user_version`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Rows written before the open transaction is committed on its own.
 const BATCH: usize = 1_000;
@@ -41,7 +41,7 @@ CREATE TABLE events (
     process  TEXT NOT NULL,
     kind     TEXT NOT NULL,
     user     TEXT NOT NULL,
-    src_ip   TEXT NOT NULL,
+    src_ip   TEXT,
     message  TEXT NOT NULL,
     product  TEXT,
     service  TEXT,
@@ -58,7 +58,7 @@ CREATE TABLE alerts (
     rule_id  TEXT NOT NULL,
     title    TEXT NOT NULL,
     severity TEXT NOT NULL,
-    src_ip   TEXT NOT NULL,
+    src_ip   TEXT,
     host     TEXT NOT NULL,
     alert    TEXT NOT NULL
 );
@@ -66,6 +66,36 @@ CREATE INDEX alerts_time ON alerts (time);
 CREATE INDEX alerts_src_ip ON alerts (src_ip, time);
 CREATE INDEX alerts_host ON alerts (host, time);
 ";
+
+fn user_version(connection: &Connection) -> rusqlite::Result<i64> {
+    connection.pragma_query_value(None, "user_version", |row| row.get(0))
+}
+
+/// Version 1 required `src_ip`. SQLite cannot drop a NOT NULL constraint,
+/// so the tables are rebuilt with every row. Runs inside the version check's
+/// transaction: a crash leaves version 1 intact.
+fn upgrade_from_1(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "DROP INDEX events_time;
+         DROP INDEX events_src_ip;
+         DROP INDEX events_user;
+         DROP INDEX events_host;
+         DROP INDEX alerts_time;
+         DROP INDEX alerts_src_ip;
+         DROP INDEX alerts_host;
+         ALTER TABLE events RENAME TO events_v1;
+         ALTER TABLE alerts RENAME TO alerts_v1;",
+    )?;
+    connection.execute_batch(SCHEMA)?;
+    connection.execute_batch(
+        "INSERT INTO events (id, time, host, process, kind, user, src_ip, message, product, service, category)
+             SELECT id, time, host, process, kind, user, src_ip, message, product, service, category FROM events_v1;
+         INSERT INTO alerts (id, time, rule_id, title, severity, src_ip, host, alert)
+             SELECT id, time, rule_id, title, severity, src_ip, host, alert FROM alerts_v1;
+         DROP TABLE events_v1;
+         DROP TABLE alerts_v1;",
+    )
+}
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -129,18 +159,38 @@ impl Store {
     /// Opens the database at `path`, creating it and its schema if needed.
     /// Refuses a database written with an unknown schema version.
     pub fn open(path: &Path) -> Result<Self> {
-        let connection = Connection::open(path)?;
+        Self::prepare(Connection::open(path)?, path, true)
+    }
+
+    /// Opens an existing database to search it, upgrading it like
+    /// [`Store::open`]. Unlike it, a missing file is an error, not a new
+    /// database, and a database minisiem did not create is left untouched.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)?;
+        // Checked before anything below changes the file (e.g. its journal).
+        if user_version(&connection)? == 0 {
+            return Err(StoreError::UnknownSchema(0));
+        }
+        Self::prepare(connection, path, false)
+    }
+
+    /// Sets the connection up and brings the schema to [`SCHEMA_VERSION`],
+    /// creating it in an empty database if `create`.
+    fn prepare(connection: Connection, path: &Path, create: bool) -> Result<Self> {
         // Another process may hold the file (e.g. creating it): wait for it.
         connection.busy_timeout(BUSY_TIMEOUT)?;
         enable_wal(&connection)?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
-        // The version is read and the schema created in one write
-        // transaction: a crash leaves no half-created schema, and of several
+        // The version is read and the schema created or upgraded in one write
+        // transaction: a crash leaves no half-done schema, and of several
         // processes opening a new file, one creates it and the others see it.
         connection.execute_batch("BEGIN IMMEDIATE")?;
-        let created = match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-            0 => connection
+        let created = match user_version(&connection)? {
+            0 if create => connection
                 .execute_batch(SCHEMA)
+                .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
+            1 => upgrade_from_1(&connection)
                 .and_then(|()| connection.pragma_update(None, "user_version", SCHEMA_VERSION)),
             SCHEMA_VERSION => Ok(()),
             other => {
@@ -161,23 +211,6 @@ impl Store {
             pending: None,
             retention: None,
         })
-    }
-
-    /// Opens an existing database to search it. Unlike [`Store::open`], a
-    /// missing file is an error, not a new database.
-    pub fn open_existing(path: &Path) -> Result<Self> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let connection = Connection::open_with_flags(path, flags)?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
-            SCHEMA_VERSION => Ok(Self {
-                connection,
-                path: path.to_owned(),
-                pending: None,
-                retention: None,
-            }),
-            other => Err(StoreError::UnknownSchema(other)),
-        }
     }
 
     /// The events matching `filter`, oldest first.
@@ -216,7 +249,7 @@ impl Store {
                 event.process,
                 event.kind.as_str(),
                 event.user,
-                event.src_ip.to_string(),
+                event.src_ip.map(|ip| ip.to_string()),
                 event.message,
                 event.logsource.product,
                 event.logsource.service,
@@ -239,7 +272,7 @@ impl Store {
                 alert.rule_id,
                 alert.title,
                 alert.severity.to_string(),
-                alert.src_ip.to_string(),
+                alert.src_ip.map(|ip| ip.to_string()),
                 alert.host,
                 encoded,
             ])?;
@@ -400,7 +433,7 @@ fn event_from_row(row: &Row) -> Result<Event> {
     let corrupt = |what: &str, value: &str| StoreError::Corrupt(format!("event {what} '{value}'"));
     let time: String = row.get(0)?;
     let kind: String = row.get(3)?;
-    let src_ip: String = row.get(5)?;
+    let src_ip: Option<String> = row.get(5)?;
     Ok(Event {
         timestamp: DateTime::parse_from_rfc3339(&time)
             .map_err(|_| corrupt("time", &time))?
@@ -409,7 +442,10 @@ fn event_from_row(row: &Row) -> Result<Event> {
         process: row.get(2)?,
         kind: EventKind::from_name(&kind).ok_or_else(|| corrupt("kind", &kind))?,
         user: row.get(4)?,
-        src_ip: src_ip.parse().map_err(|_| corrupt("src_ip", &src_ip))?,
+        src_ip: match src_ip {
+            None => None,
+            Some(ip) => Some(ip.parse().map_err(|_| corrupt("src_ip", &ip))?),
+        },
         message: row.get(6)?,
         logsource: LogSource {
             product: row.get(7)?,
@@ -483,7 +519,7 @@ mod tests {
             process: "sshd".into(),
             kind: EventKind::FailedLogin,
             user: "root".into(),
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             message: "Failed password for root from 203.0.113.7 port 1 ssh2".into(),
             logsource: LogSource::new("linux", "sshd"),
         }
@@ -498,7 +534,7 @@ mod tests {
                 id: "T1110.001".into(),
                 name: Some("Password Guessing".into()),
             }],
-            src_ip: "203.0.113.7".parse().unwrap(),
+            src_ip: Some("203.0.113.7".parse().unwrap()),
             host: "srv01".into(),
             evidence: Evidence::Burst {
                 event_count: 10,
@@ -518,6 +554,141 @@ mod tests {
             .unwrap()
             .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn keeps_events_and_alerts_without_a_source_ip() {
+        let (_dir, path) = temp_db();
+        let event = Event {
+            src_ip: None,
+            ..event(1)
+        };
+        let alert = Alert {
+            src_ip: None,
+            evidence: Evidence::Event(event.clone()),
+            ..burst()
+        };
+        let mut store = Store::open(&path).unwrap();
+
+        store.record_event(&event).unwrap();
+        store.record_alert(&alert).unwrap();
+        store.flush().unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event]);
+        assert_eq!(store.alerts(&Filter::default()).unwrap(), [alert]);
+        let nulls: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM events WHERE src_ip IS NULL) + (SELECT count(*) FROM alerts WHERE src_ip IS NULL)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 2);
+    }
+
+    /// The schema minisiem 0.1 wrote, before `src_ip` became optional.
+    const SCHEMA_V1: &str = "
+        CREATE TABLE events (id INTEGER PRIMARY KEY, time TEXT NOT NULL, host TEXT NOT NULL, process TEXT NOT NULL,
+            kind TEXT NOT NULL, user TEXT NOT NULL, src_ip TEXT NOT NULL, message TEXT NOT NULL, product TEXT,
+            service TEXT, category TEXT);
+        CREATE INDEX events_time ON events (time);
+        CREATE INDEX events_src_ip ON events (src_ip, time);
+        CREATE INDEX events_user ON events (user, time);
+        CREATE INDEX events_host ON events (host, time);
+        CREATE TABLE alerts (id INTEGER PRIMARY KEY, time TEXT NOT NULL, rule_id TEXT NOT NULL, title TEXT NOT NULL,
+            severity TEXT NOT NULL, src_ip TEXT NOT NULL, host TEXT NOT NULL, alert TEXT NOT NULL);
+        CREATE INDEX alerts_time ON alerts (time);
+        CREATE INDEX alerts_src_ip ON alerts (src_ip, time);
+        CREATE INDEX alerts_host ON alerts (host, time);
+        PRAGMA user_version = 1;
+    ";
+
+    #[test]
+    fn upgrades_a_version_1_database_keeping_its_rows() {
+        let (_dir, path) = temp_db();
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(SCHEMA_V1).unwrap();
+        old.execute_batch(
+            "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category)
+             VALUES ('2026-10-22T10:00:05.000000Z', 'srv01', 'sshd', 'failed_login', 'root', '203.0.113.7',
+                     'Failed password for root from 203.0.113.7 port 1 ssh2', 'linux', 'sshd', NULL);",
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&burst()).unwrap();
+        old.execute(
+            "INSERT INTO alerts (time, rule_id, title, severity, src_ip, host, alert)
+             VALUES ('2026-10-22T10:00:09.000000Z', 'ssh-brute-force', 'SSH brute force', 'HIGH', '203.0.113.7', 'srv01', ?1)",
+            [&encoded],
+        )
+        .unwrap();
+        drop(old);
+
+        let mut store = Store::open(&path).unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event(5)]);
+        assert_eq!(store.alerts(&Filter::default()).unwrap(), [burst()]);
+        let version: i64 = store
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        // Indexes came back with the rebuilt tables.
+        let indexes: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(indexes, 7);
+        store
+            .record_event(&Event {
+                src_ip: None,
+                ..event(6)
+            })
+            .unwrap();
+        store.flush().unwrap();
+    }
+
+    #[test]
+    fn search_upgrades_a_version_1_database_too() {
+        let (_dir, path) = temp_db();
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(SCHEMA_V1).unwrap();
+        old.execute_batch(
+            "INSERT INTO events (time, host, process, kind, user, src_ip, message, product, service, category)
+             VALUES ('2026-10-22T10:00:05.000000Z', 'srv01', 'sshd', 'failed_login', 'root', '203.0.113.7',
+                     'Failed password for root from 203.0.113.7 port 1 ssh2', 'linux', 'sshd', NULL);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open_existing(&path).unwrap();
+
+        assert_eq!(store.events(&Filter::default()).unwrap(), [event(5)]);
+    }
+
+    #[test]
+    fn search_refuses_a_database_minisiem_did_not_create() {
+        let (_dir, path) = temp_db();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE other (x);")
+            .unwrap();
+
+        let error = Store::open_existing(&path).err().unwrap();
+
+        assert!(
+            error.to_string().starts_with("unknown database schema version 0"),
+            "{error}"
+        );
+        let tables: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(tables, 1, "search must not create the schema");
     }
 
     #[test]
@@ -718,7 +889,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "unknown database schema version 99 (this minisiem writes version 1)"
+            "unknown database schema version 99 (this minisiem writes version 2)"
         );
     }
 

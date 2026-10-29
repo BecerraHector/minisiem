@@ -60,11 +60,13 @@ impl SshBruteForce {
         if event.kind != EventKind::FailedLogin {
             return None;
         }
+        // Bursts are counted per source IP: without one there is nothing to group.
+        let src_ip = event.src_ip?;
 
         let cutoff = event.timestamp - self.window;
         self.sweep(event.timestamp, cutoff);
 
-        let recent = self.failures.entry(event.src_ip).or_default();
+        let recent = self.failures.entry(src_ip).or_default();
         recent.push_back(event.clone());
 
         // Slide the window: drop failures older than `window` before `event`.
@@ -121,7 +123,7 @@ mod tests {
             process: "sshd".into(),
             kind,
             user: user.into(),
-            src_ip: ip.parse().unwrap(),
+            src_ip: Some(ip.parse().unwrap()),
             message: String::new(),
             logsource: LogSource::new("linux", "sshd"),
         }
@@ -133,6 +135,19 @@ mod tests {
 
     fn rule() -> SshBruteForce {
         SshBruteForce::new(3, Duration::seconds(60))
+    }
+
+    #[test]
+    fn ignores_failures_without_a_source_ip() {
+        let mut rule = rule();
+        for secs in 0..5 {
+            let failure = Event {
+                src_ip: None,
+                ..failed("203.0.113.7", "root", secs)
+            };
+            assert_eq!(rule.observe(&failure), None);
+        }
+        assert_eq!(rule.tracked_ips(), 0);
     }
 
     #[test]
@@ -148,7 +163,7 @@ mod tests {
         assert_eq!(alert.rule_id, "ssh-brute-force");
         assert_eq!(alert.severity, Severity::High);
         assert_eq!(alert.techniques, vec![password_guessing()]);
-        assert_eq!(alert.src_ip, "203.0.113.7".parse::<IpAddr>().unwrap());
+        assert_eq!(alert.src_ip, Some("203.0.113.7".parse::<IpAddr>().unwrap()));
         assert_eq!(alert.host, "srv01");
         assert_eq!(
             alert.evidence,
