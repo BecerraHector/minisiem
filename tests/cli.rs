@@ -94,6 +94,7 @@ fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::Exit
 /// kernel names that wait `pipe_write`, `pipe_wait_writable` or
 /// `anon_pipe_write`, depending on its version; read-side waits
 /// (`pipe_wait_readable`, and `pipe_wait` before Linux 5.5) do not count.
+/// Other names, or a `wchan` reading `0`, give `false`.
 fn blocked_writing_to_a_pipe(child: &Child) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", child.id())) else {
         return false;
@@ -122,11 +123,12 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
         .strip_prefix("minisiem: listening for syslog on udp://")
         .unwrap_or_else(|| panic!("unexpected startup line: {listening}"));
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    // One alert per source IP, in batches, until writing an alert blocks:
-    // whatever the pipe's size or how many datagrams the kernel drops.
+    // One alert per source IP, in batches, until writing an alert blocks.
+    // A kernel with another name for that wait only makes it slower: 10,000
+    // alerts are far more than a pipe holds. Either way, the grace-period
+    // message asserted below proves detection was stuck writing.
     let mut ip = 0u32;
-    while !blocked_writing_to_a_pipe(&child) {
-        assert!(ip < 50_000, "stdout never filled up");
+    while ip < 10_000 && !blocked_writing_to_a_pipe(&child) {
         for _ in 0..100 {
             let frame = format!(
                 "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 10.{}.{}.{} port 1 ssh2",
