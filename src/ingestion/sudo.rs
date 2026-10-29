@@ -12,10 +12,11 @@ use crate::event::{Event, EventKind, LogSource};
 pub const SUDO_PROCESS: &str = "sudo";
 
 /// `<user> : [<outcome> ; ]TTY=... ; COMMAND=<command>`. sudo pads the user
-/// name with spaces, which are dropped.
+/// name with spaces, which are dropped. `(?s)`: a command's arguments can
+/// hold newlines, and dropping such a command would hide it.
 static MESSAGE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?P<user>\S+) : (?:(?P<denied>user NOT in sudoers|command not allowed)|(?P<failed>\d+ incorrect password attempts?)) ; (?P<fields>TTY=.*)$|^(?P<ran_by>\S+) : (?P<ran>TTY=.*)$",
+        r"(?s)^(?P<user>\S+) : (?:(?P<denied>user NOT in sudoers|command not allowed)|(?P<failed>\d+ incorrect password attempts?)) ; (?P<fields>TTY=.*)$|^(?P<ran_by>\S+) : (?P<ran>TTY=.*)$",
     )
     .unwrap()
 });
@@ -159,6 +160,14 @@ mod tests {
         ] {
             assert_eq!(parse(message), None, "{message}");
         }
+    }
+
+    #[test]
+    fn keeps_a_command_with_a_newline_in_its_arguments() {
+        // `sudo bash -c $'true\nid'` must not go unrecorded.
+        let event = parse("hector : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/bin/bash -c true\nid").unwrap();
+
+        assert_eq!(event.command.as_deref(), Some("/bin/bash -c true\nid"));
     }
 
     #[test]
