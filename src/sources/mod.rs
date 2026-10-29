@@ -218,7 +218,8 @@ pub fn drain_reporting<S: AlertSink>(
                 pipeline.process(&event)?;
                 progress(pipeline.stats());
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            // A quiet moment: make what was archived durable and visible.
+            Err(RecvTimeoutError::Timeout) => pipeline.flush_archive()?,
             Err(RecvTimeoutError::Disconnected) => {
                 // The last source may have reported why it stopped after
                 // the control check above.

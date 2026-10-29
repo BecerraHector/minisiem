@@ -6,13 +6,15 @@
 //! RFC 3339 UTC text, which sorts in time order and reads well in `sqlite3`.
 
 use std::fmt;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 
 use crate::alert::{Alert, Evidence};
 use crate::event::Event;
+use crate::pipeline::Archive;
 
 /// The schema this version of minisiem writes, kept in `PRAGMA user_version`.
 pub const SCHEMA_VERSION: i64 = 1;
@@ -97,6 +99,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 /// An open minisiem database.
 pub struct Store {
     connection: Connection,
+    path: PathBuf,
     /// Rows written in the open transaction, if one is open.
     pending: Option<usize>,
 }
@@ -133,6 +136,7 @@ impl Store {
         }
         Ok(Self {
             connection,
+            path: path.to_owned(),
             pending: None,
         })
     }
@@ -206,6 +210,27 @@ impl Store {
             self.flush()?;
         }
         Ok(())
+    }
+}
+
+/// Errors name the database, as they reach the user next to other errors.
+impl Archive for Store {
+    fn record_event(&mut self, event: &Event) -> io::Result<()> {
+        Store::record_event(self, event).map_err(|e| self.write_error(e))
+    }
+
+    fn record_alert(&mut self, alert: &Alert) -> io::Result<()> {
+        Store::record_alert(self, alert).map_err(|e| self.write_error(e))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Store::flush(self).map_err(|e| self.write_error(e))
+    }
+}
+
+impl Store {
+    fn write_error(&self, error: StoreError) -> io::Error {
+        io::Error::other(format!("cannot write to database {}: {error}", self.path.display()))
     }
 }
 

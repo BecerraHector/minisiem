@@ -687,3 +687,167 @@ fn rejects_zero_threshold() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stdout(&output).is_empty());
 }
+
+/// A fresh directory for one test's database, removed when the test ends.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new(name: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("minisiem-{name}-{}-{nanos}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        Self(dir)
+    }
+
+    fn db(&self) -> String {
+        self.0.join("minisiem.db").to_str().unwrap().to_owned()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn count_rows(db: &str, table: &str) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+        .unwrap()
+}
+
+/// Makes every later event write to `db` fail, as a full disk would.
+fn break_event_writes(db: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute_batch("CREATE TRIGGER broken BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'disk is full'); END;")
+        .unwrap();
+}
+
+#[test]
+fn batch_keeps_events_and_alerts_in_the_database_given_with_db_and_prints_the_same() {
+    let dir = TempDir::new("batch-db");
+    let without = minisiem(&[FIXTURE]);
+
+    let with = minisiem(&["--db", &dir.db(), FIXTURE]);
+
+    assert!(with.status.success(), "stderr: {}", stderr(&with));
+    assert_eq!(stdout(&with), stdout(&without));
+    assert_eq!(stderr(&with), stderr(&without));
+    assert_eq!(count_rows(&dir.db(), "events"), 20);
+    let title: String = rusqlite::Connection::open(dir.db())
+        .unwrap()
+        .query_row("SELECT title FROM alerts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(title, "SSH brute force");
+}
+
+#[test]
+fn batch_fails_when_the_database_cannot_be_opened() {
+    let output = minisiem(&["--db", "/nonexistent/dir/minisiem.db", FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        stderr(&output).starts_with("minisiem: cannot open database /nonexistent/dir/minisiem.db: "),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn batch_fails_when_writing_to_the_database_fails() {
+    let dir = TempDir::new("batch-db-broken");
+    assert!(minisiem(&["--db", &dir.db(), FIXTURE]).status.success());
+    break_event_writes(&dir.db());
+
+    let output = minisiem(&["--db", &dir.db(), FIXTURE]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let expected = format!("cannot write to database {}: disk is full", dir.db());
+    assert!(stderr(&output).contains(&expected), "stderr: {}", stderr(&output));
+}
+
+/// Starts watch on a free UDP port and returns where to send datagrams.
+fn watch_udp(args: &[&str]) -> (Child, Receiver<String>, Receiver<String>, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--syslog-udp", "127.0.0.1:0"])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = lines_of(child.stdout.take().unwrap());
+    let stderr = lines_of(child.stderr.take().unwrap());
+    let listening = next_line(&stderr);
+    let addr = listening
+        .strip_prefix("minisiem: listening for syslog on udp://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {listening}"))
+        .to_owned();
+    (child, stdout, stderr, addr)
+}
+
+fn send_failures(addr: &str, count: usize) {
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    for i in 0..count {
+        let frame =
+            format!("<38>Oct 22 10:15:{i:02} srv01 sshd[1]: Failed password for root from 203.0.113.7 port {i} ssh2");
+        sender.send_to(frame.as_bytes(), addr).unwrap();
+    }
+}
+
+#[test]
+fn watch_keeps_events_in_the_database_while_it_runs() {
+    let dir = TempDir::new("watch-db");
+    let (mut child, stdout, stderr, addr) = watch_udp(&["--threshold", "3", "--db", &dir.db()]);
+    let _cleanup = KillOnDrop(child.id());
+
+    send_failures(&addr, 3);
+    next_line(&stdout);
+
+    // Readable while watch still runs: a quiet moment commits what was written.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while count_rows(&dir.db(), "events") < 3 || count_rows(&dir.db(), "alerts") < 1 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "events never reached the database"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    interrupt(&child);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+    assert_eq!(next_line(&stderr), "minisiem: watch: events=3 alerts=1");
+    assert_eq!(count_rows(&dir.db(), "events"), 3);
+}
+
+#[test]
+fn watch_exits_with_an_error_when_writing_to_the_database_fails() {
+    let dir = TempDir::new("watch-db-broken");
+    assert!(minisiem(&["--db", &dir.db(), FIXTURE]).status.success());
+    break_event_writes(&dir.db());
+    let (mut child, _stdout, stderr, addr) = watch_udp(&["--db", &dir.db()]);
+    let _cleanup = KillOnDrop(child.id());
+
+    send_failures(&addr, 1);
+
+    let status = wait_at_most(&mut child, Duration::from_secs(10)).expect("watch kept running");
+    assert_eq!(status.code(), Some(1));
+    let lines: Vec<String> = stderr.iter().collect();
+    let expected = format!("minisiem: cannot write to database {}: disk is full", dir.db());
+    assert!(lines.contains(&expected), "stderr: {lines:?}");
+}
+
+/// Kills a watch the test left running because an assertion failed.
+struct KillOnDrop(u32);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            let _ = Command::new("kill").args(["-KILL", &self.0.to_string()]).status();
+        }
+    }
+}

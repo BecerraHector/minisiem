@@ -21,7 +21,7 @@ Branch: `feat/storage-and-search` · Delivery: stacked PRs to main, one per task
 | ID | Specs | Route | Status | Evidence |
 |----|-------|-------|--------|----------|
 | T1 | S2, S3, S7, S10 | inline | done (PR1) | `8ece4d6`. New module, no prior RED; 7 tests, mutation-checked (no batch auto-commit, no commit on drop, any schema accepted: each fails a test). 169 unit + 1 + 23 CLI. 484 changed lines without Cargo.lock: over the 400 budget, no cohesive split (serde derives exist for this module; tests stay with code) |
-| T2 | S4, S9 | inline | pending | |
+| T2 | S4, S7, S9 | inline | done (PR2) | RED: 5 CLI tests failed (`unexpected argument '--db'`); GREEN after `Archive` port + `--db`. Mutation: no commit on idle -> watch test fails. 170 unit + 1 + 28 CLI |
 | T3 | S5, S8 | inline | pending | |
 | T4 | S6 | inline | pending | |
 | T5 | S1-S6 | inline | pending | README: usage, schema, limitations; each PR documents its own part |
@@ -36,3 +36,4 @@ Routes are inline: one parent context, units are sequential (each builds on the 
 - **L4** (2026-10-29) User chose delivery: "PRs encadenados a main (Recommended)". Slices: PR1 = T1 (`feat/storage`), PR2 = T2, PR3 = T3, PR4 = T4; each branches from main after the previous merges; README docs go with each slice.
 - **L5** (2026-10-29) T1 committed `8ece4d6` on `feat/storage`; independent verifier launched with a 10-minute budget (the previous one hung for 30+ minutes).
 - **L6** (2026-10-29) Verifier (T1, 3 min): PASS, batch output byte-identical over 22 fixture runs. Advisories A1 (schema creation not atomic; a half-created schema makes the file unopenable) and A2 (failed COMMIT wedged the store) fixed in a second commit. RED: 4 threads opening one new file -> "database is locked" at `PRAGMA journal_mode = WAL` (SQLite returns BUSY at once on that lock collision); fixed with a retry loop plus BEGIN IMMEDIATE around version check and schema; mutation `BEGIN` instead of `BEGIN IMMEDIATE` fails the test. A2 has no runnable RED (WAL commits do not fail on readers). A3 (Drop ignores flush errors) goes to T2, which flushes explicitly.
+- **L7** (2026-10-29) User: "ya mergeé, sigamos con el PR2". PR #24 merged as `4b10380`; T2 on `feat/storage-db-flag`. Design: `Archive` port in `pipeline` (Store implements it, errors name the database); watch opens the database before starting sources and commits whenever its queue is idle (S7) and when it stops; batch flushes at the end; write failures exit 1 (S9).

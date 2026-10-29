@@ -15,9 +15,10 @@ use minisiem::alerting::ConsoleSink;
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
-use minisiem::pipeline::{Pipeline, Stats};
+use minisiem::pipeline::{Archive, Pipeline, Stats};
 use minisiem::rule_loading;
 use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain_reporting};
+use minisiem::storage::Store;
 
 /// Detect attacks in sshd logs.
 ///
@@ -36,6 +37,9 @@ struct Cli {
 
     #[command(flatten)]
     detection: DetectionArgs,
+
+    #[command(flatten)]
+    storage: StorageArgs,
 }
 
 #[derive(Subcommand)]
@@ -64,6 +68,9 @@ struct WatchArgs {
 
     #[command(flatten)]
     detection: DetectionArgs,
+
+    #[command(flatten)]
+    storage: StorageArgs,
 }
 
 /// Options shared by every mode that runs detections.
@@ -104,6 +111,24 @@ impl DetectionArgs {
     }
 }
 
+/// Options shared by every mode that can keep what it sees.
+#[derive(Args)]
+struct StorageArgs {
+    /// Also keep every event and alert in this SQLite database, created if
+    /// missing. Writing to it failing stops minisiem with an error.
+    #[arg(long, value_name = "PATH")]
+    db: Option<PathBuf>,
+}
+
+impl StorageArgs {
+    /// The database, if one was given.
+    fn open(&self) -> Result<Option<Box<dyn Archive>>, String> {
+        let Some(path) = &self.db else { return Ok(None) };
+        let store = Store::open(path).map_err(|e| format!("cannot open database {}: {e}", path.display()))?;
+        Ok(Some(Box::new(store)))
+    }
+}
+
 /// Parser for every supported format. Syslog timestamps lack year and
 /// timezone: the current local ones are assumed.
 fn parser() -> AutoParser {
@@ -119,13 +144,15 @@ fn open_input(file: Option<&PathBuf>) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Batch mode: analyze a file or standard input until it ends.
-fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs) -> Result<(), String> {
+fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs, storage: &StorageArgs) -> Result<(), String> {
     let detectors = detection.detectors()?;
     let source = file.map_or("<stdin>".into(), |p| p.display().to_string());
     let input = open_input(file).map_err(|e| format!("{source}: {e}"))?;
 
-    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
+    let archive = storage.open()?;
+    let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock())).with_archive(archive);
     pipeline.run(input, &parser()).map_err(|e| format!("{source}: {e}"))?;
+    pipeline.flush_archive().map_err(|e| e.to_string())?;
 
     let stats = pipeline.stats();
     eprintln!(
@@ -141,6 +168,8 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
     if std::env::var_os(TEST_PANIC_ENV).is_some_and(|value| value == "1") {
         detectors.push(Box::new(PanicOnEvent));
     }
+    // Opened before any source starts, so a bad database fails at once.
+    let archive = args.storage.open()?;
     let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
 
     let mut kernel_drops = None;
@@ -178,12 +207,14 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         let progress = Arc::clone(&progress);
         thread::spawn(move || {
             let _report = ReportPanic(ended.clone());
-            let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock()));
+            let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock())).with_archive(archive);
             let stop = drain_reporting(&inlet, &mut pipeline, |stats| {
                 if let Ok(mut progress) = progress.lock() {
                     *progress = stats;
                 }
             });
+            // Whatever the stop, what was archived must reach the disk.
+            let stop = stop.and_then(|stop| pipeline.flush_archive().map(|()| stop));
             let stats = pipeline.stats();
             // Release stdout before the main thread reports and exits.
             drop(pipeline);
@@ -297,7 +328,7 @@ fn main() -> ExitCode {
 
     let result = match &cli.command {
         Some(Command::Watch(args)) => watch(args),
-        None => analyze(cli.file.as_ref(), &cli.detection),
+        None => analyze(cli.file.as_ref(), &cli.detection, &cli.storage),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
