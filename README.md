@@ -219,8 +219,9 @@ database cannot be opened or written, minisiem reports it and exits with code `1
 
 `watch --db <PATH> --retain-days <N>` deletes the events and alerts more than `N` days old (by
 their time, `1` to `36500`) when it starts, before listening, and then once an hour while it runs,
-in chunks so detection never waits long for the database. Without `--retain-days` nothing is
-deleted.
+in chunks of 10,000 rows so other readers (`search`, `sqlite3`) are never locked out for long.
+Detection waits while a prune runs, so the first one on a large database delays startup. Without
+`--retain-days` nothing is deleted.
 
 Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `PRAGMA
 user_version` holds the schema version; minisiem refuses a database with a version it does not know.
