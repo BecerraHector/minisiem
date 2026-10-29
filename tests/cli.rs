@@ -92,14 +92,16 @@ fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::Exit
 #[cfg(target_os = "linux")]
 /// True when one of the child's threads waits for room in a full pipe. The
 /// kernel names that wait `pipe_write`, `pipe_wait_writable` or
-/// `anon_pipe_write`, depending on its version.
+/// `anon_pipe_write`, depending on its version; read-side waits
+/// (`pipe_wait_readable`, and `pipe_wait` before Linux 5.5) do not count.
 fn blocked_writing_to_a_pipe(child: &Child) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", child.id())) else {
         return false;
     };
-    tasks
-        .filter_map(Result::ok)
-        .any(|task| std::fs::read_to_string(task.path().join("wchan")).is_ok_and(|wchan| wchan.contains("pipe_w")))
+    tasks.filter_map(Result::ok).any(|task| {
+        std::fs::read_to_string(task.path().join("wchan"))
+            .is_ok_and(|wchan| ["pipe_write", "pipe_wait_writable", "anon_pipe_write"].contains(&wchan.trim()))
+    })
 }
 
 #[cfg(target_os = "linux")]
