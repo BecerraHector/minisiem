@@ -217,6 +217,11 @@ database cannot be opened or written, minisiem reports it and exits with code `1
 | `events` | `time`, `host`, `process`, `kind` (as `event_kind`), `user`, `src_ip`, `message`, `product`, `service`, `category` |
 | `alerts` | `time` (the last event behind the alert), `rule_id`, `title`, `severity`, `src_ip`, `host`, `alert` (the whole alert as JSON) |
 
+`watch --db <PATH> --retain-days <N>` deletes the events and alerts more than `N` days old (by
+their time, `1` to `36500`) when it starts, before listening, and then once an hour while it runs,
+in chunks so detection never waits long for the database. Without `--retain-days` nothing is
+deleted.
+
 Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `PRAGMA
 user_version` holds the schema version; minisiem refuses a database with a version it does not know.
 
