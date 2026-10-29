@@ -256,7 +256,12 @@ mod tests {
 
         let dropped = drops.count().unwrap();
         assert!(dropped > 0, "the flood overflowed the buffer");
-        assert_eq!(received + dropped, sent, "every datagram is either read or counted");
+        // Loopback can also lose datagrams before the socket (the per-CPU
+        // backlog), which the socket's counter does not see.
+        assert!(
+            received + dropped <= sent,
+            "{received} read + {dropped} dropped of {sent}"
+        );
     }
 
     #[cfg(target_os = "linux")]
