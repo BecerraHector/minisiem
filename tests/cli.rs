@@ -161,11 +161,12 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
 }
 
-#[test]
-fn watch_exits_with_101_when_detection_panics() {
+/// Starts `watch --syslog-udp` with `MINISIEM_TEST_PANIC` set to `panic`,
+/// sends it one sshd failure and returns it with its stderr lines.
+fn watch_one_event_with_test_panic(panic: &str) -> (Child, Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
         .args(["watch", "--syslog-udp", "127.0.0.1:0"])
-        .env("MINISIEM_TEST_PANIC", "1")
+        .env("MINISIEM_TEST_PANIC", panic)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -184,12 +185,34 @@ fn watch_exits_with_101_when_detection_panics() {
             &addr,
         )
         .unwrap();
+    (child, stderr)
+}
+
+#[test]
+fn watch_exits_with_101_when_detection_panics() {
+    let (mut child, stderr) = watch_one_event_with_test_panic("1");
     let status = wait_at_most(&mut child, Duration::from_secs(10));
 
     assert_eq!(status.map(|s| s.code()), Some(Some(101)), "a panic must not hang watch");
     let reported = std::iter::from_fn(|| stderr.recv_timeout(Duration::from_secs(1)).ok())
         .any(|line| line.contains("panicked") || line.contains("MINISIEM_TEST_PANIC is set"));
     assert!(reported, "the panic message reaches stderr");
+}
+
+#[test]
+fn watch_ignores_a_test_panic_variable_not_set_to_1() {
+    for value in ["", "0"] {
+        let (mut child, stderr) = watch_one_event_with_test_panic(value);
+        thread::sleep(Duration::from_millis(500));
+
+        interrupt(&child);
+        assert_eq!(
+            wait_at_most(&mut child, Duration::from_secs(10)).map(|s| s.code()),
+            Some(Some(0)),
+            "MINISIEM_TEST_PANIC={value:?}"
+        );
+        assert_eq!(next_line(&stderr), "minisiem: watch: events=1 alerts=0");
+    }
 }
 
 #[cfg(target_os = "linux")]
