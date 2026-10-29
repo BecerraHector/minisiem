@@ -9,6 +9,7 @@ cargo run -- --threshold 5 --window 60 /var/log/auth.log
 journalctl -o json --no-pager _COMM=sshd-session | cargo run -- --rules rules
 cargo run -- watch --journal --syslog-udp 127.0.0.1:5514 --rules rules
 cargo run -- watch --journal --rules rules --db minisiem.db
+cargo run -- search --db minisiem.db events --ip 203.0.113.7 --since 1d
 ```
 
 Alerts go to stdout, one per line, flushed as they happen; startup messages and a summary go
@@ -145,7 +146,7 @@ it decides which program minisiem trusts for journald events, so keep it out of 
 users. `MINISIEM_TEST_PANIC=1`, for tests only, makes detection panic on the first event (watch then
 exits with code 101).
 
-`watch` is always the subcommand: to analyze a file named `watch`, give it a path, as in
+`watch` and `search` are always subcommands: to analyze a file named `watch`, give it a path, as in
 `minisiem ./watch`.
 
 To follow a log file, let `tail` handle rotation and pipe it into batch mode:
@@ -219,6 +220,32 @@ database cannot be opened or written, minisiem reports it and exits with code `1
 Times are UTC text such as `2026-10-22T10:15:32.000000Z`, so they sort in time order. `PRAGMA
 user_version` holds the schema version; minisiem refuses a database with a version it does not know.
 
+### Search
+
+`minisiem search --db <PATH> <events|alerts>` lists what a database kept, oldest first. Alerts are
+printed exactly as the console printed them; events as one line each:
+
+```
+2026-10-22T10:15:32+00:00 host=srv01 process=sshd src=203.0.113.7 user=root event_kind=failed_login message="Failed password for root from 203.0.113.7 port 22 ssh2"
+```
+
+| Filter | Matches |
+|--------|---------|
+| `--ip <IP>` | source IP |
+| `--user <USER>` | user (events only) |
+| `--host <HOST>` | host |
+| `--kind <KIND>` | `failed_login`, `invalid_user` or `successful_login` (events only) |
+| `--since <TIME>` / `--until <TIME>` | from / up to a time, both included: RFC 3339 (`2026-10-22T10:15:32Z`), a date (`2026-10-22`, local midnight) or an age (`<number><s\|m\|h\|d>`, e.g. `--since 30m`) |
+
+Filters combine (all must match). `--user` and `--kind` with `alerts` are refused (exit code `2`),
+and a missing database is an error, not a new empty one. Anything else is a `sqlite3` query away,
+with the schema above.
+
+```sh
+minisiem search --db minisiem.db events --ip 203.0.113.7 --since 1d
+minisiem search --db minisiem.db alerts --since 2026-10-22 --until 2026-10-23
+```
+
 ## Architecture
 
 ```
@@ -245,7 +272,8 @@ Ctrl+C / SIGTERM ─────────┘ (shutdown)
 | `rule_loading` | Adapter that loads Sigma rule files from a directory into a validated rule set |
 | `alerting` | `AlertSink` port and the console adapter |
 | `pipeline` | Use case running detectors on events and delivering alerts |
-| `storage` | Adapter keeping events and alerts in SQLite, behind the pipeline's `Archive` port |
+| `storage` | Adapter keeping events and alerts in SQLite, behind the pipeline's `Archive` port, and searching them |
+| `timespan` | `<number><s\|m\|h\|d>` spans, shared by correlation rules and search |
 | `sources` | Live source adapters for watch mode (journald, syslog UDP) and the channel they feed |
 
 ## Known limitations

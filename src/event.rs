@@ -24,6 +24,17 @@ impl EventKind {
             EventKind::SuccessfulLogin => "successful_login",
         }
     }
+
+    pub const ALL: [EventKind; 3] = [
+        EventKind::FailedLogin,
+        EventKind::InvalidUser,
+        EventKind::SuccessfulLogin,
+    ];
+
+    /// The kind named `name` (see [`EventKind::as_str`]).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
+    }
 }
 
 /// Where an event comes from, using Sigma's `logsource` vocabulary.

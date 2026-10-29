@@ -7,13 +7,14 @@
 
 use std::fmt;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, Row, params, params_from_iter};
 
 use crate::alert::{Alert, Evidence};
-use crate::event::Event;
+use crate::event::{Event, EventKind, LogSource};
 use crate::pipeline::Archive;
 
 /// The schema this version of minisiem writes, kept in `PRAGMA user_version`.
@@ -65,6 +66,10 @@ pub enum StoreError {
     Json(serde_json::Error),
     /// The file was written by another version of minisiem.
     UnknownSchema(i64),
+    /// A stored row minisiem cannot read back.
+    Corrupt(String),
+    /// A filter on a field alerts do not have.
+    EventOnlyFilter(&'static str),
 }
 
 impl fmt::Display for StoreError {
@@ -76,6 +81,8 @@ impl fmt::Display for StoreError {
                 f,
                 "unknown database schema version {version} (this minisiem writes version {SCHEMA_VERSION})"
             ),
+            StoreError::Corrupt(detail) => write!(f, "unreadable row: {detail}"),
+            StoreError::EventOnlyFilter(field) => write!(f, "{field} only filters events"),
         }
     }
 }
@@ -139,6 +146,44 @@ impl Store {
             path: path.to_owned(),
             pending: None,
         })
+    }
+
+    /// Opens an existing database to search it. Unlike [`Store::open`], a
+    /// missing file is an error, not a new database.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let connection = Connection::open_with_flags(path, flags)?;
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        match connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? {
+            SCHEMA_VERSION => Ok(Self {
+                connection,
+                path: path.to_owned(),
+                pending: None,
+            }),
+            other => Err(StoreError::UnknownSchema(other)),
+        }
+    }
+
+    /// The events matching `filter`, oldest first.
+    pub fn events(&self, filter: &Filter) -> Result<Vec<Event>> {
+        let (conditions, values) = filter.sql(true)?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT time, host, process, kind, user, src_ip, message, product, service, category
+             FROM events {conditions} ORDER BY time, id"
+        ))?;
+        let rows = statement.query_map(params_from_iter(values), |row| Ok(event_from_row(row)))?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The alerts matching `filter`, oldest first.
+    pub fn alerts(&self, filter: &Filter) -> Result<Vec<Alert>> {
+        let (conditions, values) = filter.sql(false)?;
+        let mut statement = self
+            .connection
+            .prepare(&format!("SELECT alert FROM alerts {conditions} ORDER BY time, id"))?;
+        let rows = statement.query_map(params_from_iter(values), |row| row.get::<_, String>(0))?;
+        rows.map(|row| serde_json::from_str(&row?).map_err(|e| StoreError::Corrupt(format!("alert: {e}"))))
+            .collect()
     }
 
     /// Writes an event. It is durable after the next [`Store::flush`].
@@ -261,6 +306,72 @@ fn enable_wal(connection: &Connection) -> rusqlite::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// What a search looks for: every field given must match. Times are
+/// inclusive.
+#[derive(Debug, Default, Clone)]
+pub struct Filter {
+    pub ip: Option<IpAddr>,
+    pub user: Option<String>,
+    pub host: Option<String>,
+    pub kind: Option<EventKind>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+}
+
+impl Filter {
+    /// The `WHERE` clause and its values. Alerts have no user or kind.
+    fn sql(&self, events: bool) -> Result<(String, Vec<String>)> {
+        if !events {
+            if self.user.is_some() {
+                return Err(StoreError::EventOnlyFilter("user"));
+            }
+            if self.kind.is_some() {
+                return Err(StoreError::EventOnlyFilter("kind"));
+            }
+        }
+        let conditions = [
+            ("src_ip = ?", self.ip.map(|ip| ip.to_string())),
+            ("user = ?", self.user.clone()),
+            ("host = ?", self.host.clone()),
+            ("kind = ?", self.kind.map(|kind| kind.as_str().to_owned())),
+            ("time >= ?", self.since.map(time_text)),
+            ("time <= ?", self.until.map(time_text)),
+        ];
+        let (clauses, values): (Vec<&str>, Vec<String>) = conditions
+            .into_iter()
+            .filter_map(|(clause, value)| value.map(|value| (clause, value)))
+            .unzip();
+        match clauses.is_empty() {
+            true => Ok((String::new(), values)),
+            false => Ok((format!("WHERE {}", clauses.join(" AND ")), values)),
+        }
+    }
+}
+
+/// Reads back a row written by [`Store::record_event`].
+fn event_from_row(row: &Row) -> Result<Event> {
+    let corrupt = |what: &str, value: &str| StoreError::Corrupt(format!("event {what} '{value}'"));
+    let time: String = row.get(0)?;
+    let kind: String = row.get(3)?;
+    let src_ip: String = row.get(5)?;
+    Ok(Event {
+        timestamp: DateTime::parse_from_rfc3339(&time)
+            .map_err(|_| corrupt("time", &time))?
+            .with_timezone(&Utc),
+        host: row.get(1)?,
+        process: row.get(2)?,
+        kind: EventKind::from_name(&kind).ok_or_else(|| corrupt("kind", &kind))?,
+        user: row.get(4)?,
+        src_ip: src_ip.parse().map_err(|_| corrupt("src_ip", &src_ip))?,
+        message: row.get(6)?,
+        logsource: LogSource {
+            product: row.get(7)?,
+            service: row.get(8)?,
+            category: row.get(9)?,
+        },
+    })
 }
 
 /// When an alert happened: its last contributing event.

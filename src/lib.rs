@@ -7,3 +7,4 @@ pub mod pipeline;
 pub mod rule_loading;
 pub mod sources;
 pub mod storage;
+pub mod timespan;

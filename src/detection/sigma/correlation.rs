@@ -1,10 +1,7 @@
 //! Sigma correlation rules (Sigma specification v2.1.0) and multi-document
 //! rule files.
 
-use std::sync::LazyLock;
-
 use chrono::Duration;
-use regex::Regex;
 
 use super::rule::{RawRule, RuleError, SigmaRule, error, parse_level, techniques_from_tags};
 use super::value::Value;
@@ -88,8 +85,6 @@ pub fn parse_documents(yaml: &str) -> Result<Vec<RuleDocument>, RuleError> {
         })
         .collect()
 }
-
-static TIMESPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{1,9})([smhd])$").unwrap());
 
 impl CorrelationRule {
     fn from_raw(raw: RawRule) -> Result<Self, RuleError> {
@@ -202,24 +197,12 @@ fn check_field(field: &str, key: &str) -> Result<(), RuleError> {
 
 /// `<number><s|m|h|d>`, strictly positive.
 fn parse_timespan(text: &str) -> Result<Duration, RuleError> {
-    let invalid = || {
-        error(format!(
+    match crate::timespan::parse(text) {
+        Some(span) => Ok(span),
+        None => error(format!(
             "invalid timespan '{text}' (expected <number><s|m|h|d>, e.g. 5m)"
-        ))
-    };
-    let Some(caps) = TIMESPAN.captures(text) else {
-        return invalid();
-    };
-    let amount: i64 = caps[1].parse().expect("at most 9 digits");
-    if amount == 0 {
-        return invalid();
+        )),
     }
-    Ok(match &caps[2] {
-        "s" => Duration::seconds(amount),
-        "m" => Duration::minutes(amount),
-        "h" => Duration::hours(amount),
-        _ => Duration::days(amount),
-    })
 }
 
 /// Returns the threshold and the optional `field` of a count condition.

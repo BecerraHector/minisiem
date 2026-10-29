@@ -14,6 +14,7 @@ Branch: `feat/storage-and-search` · Delivery: stacked PRs to main, one per task
 - **S7** (assumption) Writes are grouped in transactions (WAL journal), so a flood does not sync to disk once per event.
 - **S8** (assumption) `--since`/`--until` accept an RFC 3339 time, a `YYYY-MM-DD` date, or a relative age `<number><s|m|h|d>` (as in Sigma timespans); results are listed oldest first.
 - **S9** (assumption) Fail closed: if writing to the database fails, batch and watch report it and exit with code 1, as a stopped source does; storage failing silently would be a blind spot.
+- **S11** (assumption) `events|alerts` is a required argument; `--user` and `--kind` only exist for events, so with `alerts` they are refused (exit 2) instead of ignored. Events print as `<time> host= process= src= user= event_kind= message="..."`; a date in `--since`/`--until` is local midnight and both bounds are inclusive. A missing database is an error, not created.
 - **S10** (assumption) The schema carries a version (`PRAGMA user_version`); minisiem refuses a database with a version it does not know.
 
 ## Tasks
@@ -22,7 +23,7 @@ Branch: `feat/storage-and-search` · Delivery: stacked PRs to main, one per task
 |----|-------|-------|--------|----------|
 | T1 | S2, S3, S7, S10 | inline | done (PR1) | `8ece4d6`. New module, no prior RED; 7 tests, mutation-checked (no batch auto-commit, no commit on drop, any schema accepted: each fails a test). 169 unit + 1 + 23 CLI. 484 changed lines without Cargo.lock: over the 400 budget, no cohesive split (serde derives exist for this module; tests stay with code) |
 | T2 | S4, S7, S9 | inline | done (PR2) | RED: 5 CLI tests failed (`unexpected argument '--db'`); GREEN after `Archive` port + `--db`. Mutation: no commit on idle -> watch test fails. 170 unit + 1 + 28 CLI |
-| T3 | S5, S8 | inline | pending | |
+| T3 | S5, S8, S11 | inline | done (PR3) | RED: 7 of 8 search CLI tests failed (no `search`); GREEN after `Store::events/alerts` + `Filter` + `search` subcommand. Timespan parsing shared with correlation rules (`src/timespan.rs`); its existing invalid-timespan test still passes |
 | T4 | S6 | inline | pending | |
 | T5 | S1-S6 | inline | pending | README: usage, schema, limitations; each PR documents its own part |
 
@@ -37,3 +38,4 @@ Routes are inline: one parent context, units are sequential (each builds on the 
 - **L5** (2026-10-29) T1 committed `8ece4d6` on `feat/storage`; independent verifier launched with a 10-minute budget (the previous one hung for 30+ minutes).
 - **L6** (2026-10-29) Verifier (T1, 3 min): PASS, batch output byte-identical over 22 fixture runs. Advisories A1 (schema creation not atomic; a half-created schema makes the file unopenable) and A2 (failed COMMIT wedged the store) fixed in a second commit. RED: 4 threads opening one new file -> "database is locked" at `PRAGMA journal_mode = WAL` (SQLite returns BUSY at once on that lock collision); fixed with a retry loop plus BEGIN IMMEDIATE around version check and schema; mutation `BEGIN` instead of `BEGIN IMMEDIATE` fails the test. A2 has no runnable RED (WAL commits do not fail on readers). A3 (Drop ignores flush errors) goes to T2, which flushes explicitly.
 - **L7** (2026-10-29) User: "ya mergeé, sigamos con el PR2". PR #24 merged as `4b10380`; T2 on `feat/storage-db-flag`. Design: `Archive` port in `pipeline` (Store implements it, errors name the database); watch opens the database before starting sources and commits whenever its queue is idle (S7) and when it stops; batch flushes at the end; write failures exit 1 (S9).
+- **L8** (2026-10-29) User: "ya mergeé, sigamos con el PR3". PR #25 merged as `e6c4b4d`; T3 on `feat/storage-search`. Assumptions recorded as S11.

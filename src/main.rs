@@ -1,6 +1,7 @@
 use std::fs::File;
+use std::io::Write;
 use std::io::{self, BufRead, BufReader};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
@@ -8,17 +9,19 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{Datelike, Duration, Local, Offset};
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Offset, TimeZone, Utc};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
+use clap::{ArgGroup, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
-use minisiem::alerting::ConsoleSink;
+use minisiem::alerting::{AlertSink, ConsoleSink, EventLine};
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
+use minisiem::event::EventKind;
 use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
 use minisiem::pipeline::{Archive, Pipeline, Stats};
 use minisiem::rule_loading;
 use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain_reporting};
-use minisiem::storage::Store;
+use minisiem::storage::{Filter, Store};
 
 /// Detect attacks in sshd logs.
 ///
@@ -46,6 +49,73 @@ struct Cli {
 enum Command {
     /// Watch live sources and print alerts as events arrive, until Ctrl+C.
     Watch(WatchArgs),
+    /// List the events or alerts kept with --db, oldest first.
+    Search(SearchArgs),
+}
+
+#[derive(Args)]
+struct SearchArgs {
+    /// Database written with --db.
+    #[arg(long, value_name = "PATH")]
+    db: PathBuf,
+
+    /// What to list.
+    #[arg(value_enum)]
+    table: Table,
+
+    /// Only this source IP.
+    #[arg(long, value_name = "IP")]
+    ip: Option<IpAddr>,
+
+    /// Only this user (events only).
+    #[arg(long)]
+    user: Option<String>,
+
+    /// Only this host.
+    #[arg(long)]
+    host: Option<String>,
+
+    /// Only this kind of event (events only).
+    #[arg(long, value_parser = PossibleValuesParser::new(EventKind::ALL.map(EventKind::as_str))
+        .map(|name| EventKind::from_name(&name).expect("a possible value")))]
+    kind: Option<EventKind>,
+
+    /// From this time on: an RFC 3339 time (2026-10-22T10:15:32Z), a date
+    /// (2026-10-22, local midnight) or an age (<number><s|m|h|d>, e.g. 30m ago).
+    #[arg(long, value_name = "TIME", value_parser = parse_time)]
+    since: Option<DateTime<Utc>>,
+
+    /// Up to this time, included: same forms as --since.
+    #[arg(long, value_name = "TIME", value_parser = parse_time)]
+    until: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Table {
+    Events,
+    Alerts,
+}
+
+/// `--since`/`--until`: an RFC 3339 time, a local date or an age.
+fn parse_time(text: &str) -> Result<DateTime<Utc>, String> {
+    if let Ok(time) = DateTime::parse_from_rfc3339(text) {
+        return Ok(time.with_timezone(&Utc));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return Local
+            .from_local_datetime(&date.and_time(chrono::NaiveTime::MIN))
+            .earliest()
+            .map(|time| time.with_timezone(&Utc))
+            .ok_or_else(|| format!("{text} has no local midnight"));
+    }
+    if let Some(age) = minisiem::timespan::parse(text) {
+        return Ok(Utc::now() - age);
+    }
+    Err(
+        "expected an RFC 3339 time (2026-10-22T10:15:32Z), a date (2026-10-22) or an age (<number><s|m|h|d>, e.g. \
+         30m)"
+            .into(),
+    )
 }
 
 #[derive(Args)]
@@ -160,6 +230,49 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs, storage: &StorageA
         stats.lines, stats.events, stats.alerts
     );
     Ok(())
+}
+
+/// Search mode: list what a database kept, oldest first.
+fn search(args: &SearchArgs) -> Result<(), String> {
+    if let Table::Alerts = args.table {
+        for (flag, given) in [("--user", args.user.is_some()), ("--kind", args.kind.is_some())] {
+            if given {
+                Cli::command()
+                    .error(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        format!("{flag} only filters events"),
+                    )
+                    .exit();
+            }
+        }
+    }
+    let path = args.db.display();
+    let store = Store::open_existing(&args.db).map_err(|e| format!("cannot open database {path}: {e}"))?;
+    let filter = Filter {
+        ip: args.ip,
+        user: args.user.clone(),
+        host: args.host.clone(),
+        kind: args.kind,
+        since: args.since,
+        until: args.until,
+    };
+    let unreadable = |e| format!("cannot read database {path}: {e}");
+    let mut out = io::stdout().lock();
+    match args.table {
+        Table::Events => {
+            for event in store.events(&filter).map_err(unreadable)? {
+                writeln!(out, "{}", EventLine(&event)).map_err(|e| e.to_string())?;
+            }
+            out.flush().map_err(|e| e.to_string())
+        }
+        Table::Alerts => {
+            let mut console = ConsoleSink::new(out);
+            for alert in store.alerts(&filter).map_err(unreadable)? {
+                console.emit(&alert).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Watch mode: run until interrupted or until a source fails.
@@ -328,6 +441,7 @@ fn main() -> ExitCode {
 
     let result = match &cli.command {
         Some(Command::Watch(args)) => watch(args),
+        Some(Command::Search(args)) => search(args),
         None => analyze(cli.file.as_ref(), &cli.detection, &cli.storage),
     };
     match result {

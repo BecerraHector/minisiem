@@ -1,7 +1,9 @@
+use std::fmt;
 use std::io::{self, Write};
 
 use super::AlertSink;
 use crate::alert::{Alert, Evidence};
+use crate::event::Event;
 
 /// Writes one human-readable line per alert.
 pub struct ConsoleSink<W: Write> {
@@ -79,6 +81,27 @@ impl<W: Write> ConsoleSink<W> {
                 writeln!(self.out)
             }
         }
+    }
+}
+
+/// One event as a console line, with its fields quoted as in alerts:
+/// `<time> host=.. process=.. src=.. user=.. event_kind=.. message=".."`.
+pub struct EventLine<'a>(pub &'a Event);
+
+impl fmt::Display for EventLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let event = self.0;
+        write!(
+            f,
+            "{} host={} process={} src={} user={} event_kind={} message={:?}",
+            event.timestamp.to_rfc3339(),
+            field_value(&event.host),
+            field_value(&event.process),
+            event.src_ip,
+            field_value(&event.user),
+            event.kind.as_str(),
+            event.message,
+        )
     }
 }
 
