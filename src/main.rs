@@ -136,6 +136,11 @@ struct WatchArgs {
     #[arg(long, requires = "syslog_udp")]
     allow_remote_syslog: bool,
 
+    /// Delete the events and alerts older than this many days from the
+    /// --db database when watch starts, and then every hour.
+    #[arg(long, value_name = "DAYS", requires = "db", value_parser = clap::value_parser!(u64).range(1..=36_500))]
+    retain_days: Option<u64>,
+
     #[command(flatten)]
     detection: DetectionArgs,
 
@@ -191,10 +196,16 @@ struct StorageArgs {
 }
 
 impl StorageArgs {
-    /// The database, if one was given.
-    fn open(&self) -> Result<Option<Box<dyn Archive>>, String> {
+    /// The database, if one was given, keeping only the last `retain_days`
+    /// days if given.
+    fn open(&self, retain_days: Option<u64>) -> Result<Option<Box<dyn Archive>>, String> {
         let Some(path) = &self.db else { return Ok(None) };
-        let store = Store::open(path).map_err(|e| format!("cannot open database {}: {e}", path.display()))?;
+        let mut store = Store::open(path).map_err(|e| format!("cannot open database {}: {e}", path.display()))?;
+        if let Some(days) = retain_days {
+            store
+                .retain(Duration::days(days as i64))
+                .map_err(|e| format!("cannot write to database {}: {e}", path.display()))?;
+        }
         Ok(Some(Box::new(store)))
     }
 }
@@ -219,7 +230,7 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs, storage: &StorageA
     let source = file.map_or("<stdin>".into(), |p| p.display().to_string());
     let input = open_input(file).map_err(|e| format!("{source}: {e}"))?;
 
-    let archive = storage.open()?;
+    let archive = storage.open(None)?;
     let mut pipeline = Pipeline::new(detectors, ConsoleSink::new(io::stdout().lock())).with_archive(archive);
     pipeline.run(input, &parser()).map_err(|e| format!("{source}: {e}"))?;
     pipeline.flush_archive().map_err(|e| e.to_string())?;
@@ -282,7 +293,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         detectors.push(Box::new(PanicOnEvent));
     }
     // Opened before any source starts, so a bad database fails at once.
-    let archive = args.storage.open()?;
+    let archive = args.storage.open(args.retain_days)?;
     let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
 
     let mut kernel_drops = None;

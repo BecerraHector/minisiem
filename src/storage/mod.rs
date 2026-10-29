@@ -23,6 +23,13 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// Rows written before the open transaction is committed on its own.
 const BATCH: usize = 1_000;
 
+/// How often retention deletes again what has grown too old.
+const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Rows deleted per statement, so pruning a large backlog never holds the
+/// database for long at a time.
+const PRUNE_CHUNK: usize = 10_000;
+
 /// How long to wait for another process holding the database.
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -109,6 +116,13 @@ pub struct Store {
     path: PathBuf,
     /// Rows written in the open transaction, if one is open.
     pending: Option<usize>,
+    retention: Option<Retention>,
+}
+
+/// Keep only what happened in the last `keep`.
+struct Retention {
+    keep: chrono::Duration,
+    next_prune: std::time::Instant,
 }
 
 impl Store {
@@ -145,6 +159,7 @@ impl Store {
             connection,
             path: path.to_owned(),
             pending: None,
+            retention: None,
         })
     }
 
@@ -159,6 +174,7 @@ impl Store {
                 connection,
                 path: path.to_owned(),
                 pending: None,
+                retention: None,
             }),
             other => Err(StoreError::UnknownSchema(other)),
         }
@@ -230,13 +246,42 @@ impl Store {
         self.written()
     }
 
-    /// Commits what was written so far.
+    /// Commits what was written so far. With retention, also deletes what
+    /// grew too old once [`PRUNE_EVERY`] has gone by.
     pub fn flush(&mut self) -> Result<()> {
         if self.pending.is_some() {
             // Still pending if COMMIT fails, so a later flush can retry it.
             self.connection.execute_batch("COMMIT")?;
             self.pending = None;
         }
+        self.prune_if_due(std::time::Instant::now())
+    }
+
+    /// Deletes the events and alerts older than `keep` now, and again every
+    /// [`PRUNE_EVERY`] from then on, when writes are committed.
+    pub fn retain(&mut self, keep: chrono::Duration) -> Result<()> {
+        self.flush()?;
+        self.retention = Some(Retention {
+            keep,
+            next_prune: std::time::Instant::now(),
+        });
+        self.prune_if_due(std::time::Instant::now())
+    }
+
+    fn prune_if_due(&mut self, now: std::time::Instant) -> Result<()> {
+        let Some(retention) = &mut self.retention else {
+            return Ok(());
+        };
+        if now < retention.next_prune || self.pending.is_some() {
+            return Ok(());
+        }
+        let cutoff = time_text(Utc::now() - retention.keep);
+        for table in ["events", "alerts"] {
+            let delete =
+                format!("DELETE FROM {table} WHERE id IN (SELECT id FROM {table} WHERE time < ?1 LIMIT {PRUNE_CHUNK})");
+            while self.connection.execute(&delete, [&cutoff])? > 0 {}
+        }
+        retention.next_prune = now + PRUNE_EVERY;
         Ok(())
     }
 
@@ -462,6 +507,70 @@ mod tests {
                 users: vec!["admin".into(), "root".into()],
             },
         }
+    }
+
+    fn event_at(timestamp: DateTime<Utc>) -> Event {
+        Event { timestamp, ..event(0) }
+    }
+
+    fn count(path: &Path, table: &str) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn retain_deletes_what_is_older_at_once() {
+        let (_dir, path) = temp_db();
+        let old = event_at(Utc::now() - chrono::Duration::days(31));
+        let recent = event_at(Utc::now() - chrono::Duration::days(29));
+        {
+            let mut store = Store::open(&path).unwrap();
+            for event in [&old, &recent] {
+                store.record_event(event).unwrap();
+                store
+                    .record_alert(&Alert {
+                        evidence: Evidence::Event(event.clone()),
+                        ..burst()
+                    })
+                    .unwrap();
+            }
+        }
+
+        Store::open(&path).unwrap().retain(chrono::Duration::days(30)).unwrap();
+
+        assert_eq!(count(&path, "events"), 1);
+        assert_eq!(count(&path, "alerts"), 1);
+        let kept: String = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT time FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, time_text(recent.timestamp));
+    }
+
+    #[test]
+    fn retention_runs_again_an_hour_later() {
+        let (_dir, path) = temp_db();
+        let mut store = Store::open(&path).unwrap();
+        store.retain(chrono::Duration::days(30)).unwrap();
+        store
+            .record_event(&event_at(Utc::now() - chrono::Duration::days(31)))
+            .unwrap();
+
+        store.flush().unwrap();
+        assert_eq!(count(&path, "events"), 1, "pruned before an hour went by");
+
+        // An hour later, the next commit deletes it.
+        store.retention.as_mut().unwrap().next_prune = std::time::Instant::now();
+        store.record_event(&event_at(Utc::now())).unwrap();
+        store.flush().unwrap();
+        assert_eq!(count(&path, "events"), 1);
+        let kept: String = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT time FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert!(kept > time_text(Utc::now() - chrono::Duration::days(1)), "kept: {kept}");
     }
 
     #[test]

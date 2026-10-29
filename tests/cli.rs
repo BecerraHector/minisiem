@@ -1060,3 +1060,74 @@ fn search_fails_without_creating_a_missing_database() {
     );
     assert!(!std::path::Path::new(&dir.db()).exists());
 }
+
+/// A database with one event 40 days old and one a day old.
+fn retention_db(dir: &TempDir) {
+    let at = |days| {
+        (chrono::Utc::now() - chrono::Duration::days(days))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    };
+    search_db(
+        dir,
+        &[
+            frame(
+                &at(40),
+                "srv01",
+                "Failed password for root from 203.0.113.7 port 1 ssh2",
+            ),
+            frame(&at(1), "srv01", "Failed password for root from 203.0.113.8 port 2 ssh2"),
+        ],
+    );
+}
+
+#[test]
+fn watch_retain_days_deletes_older_events_when_it_starts() {
+    let dir = TempDir::new("retain");
+    retention_db(&dir);
+
+    let (mut child, _stdout, _stderr, _addr) = watch_udp(&["--db", &dir.db(), "--retain-days", "30"]);
+    let _cleanup = KillOnDrop(child.id());
+
+    // Deleted before watch starts listening.
+    let kept = search_lines(&dir.db(), &["events"]);
+    assert_eq!(kept.len(), 1, "events: {kept:?}");
+    assert!(kept[0].contains("src=203.0.113.8"), "events: {kept:?}");
+    interrupt(&child);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+}
+
+#[test]
+fn watch_without_retain_days_deletes_nothing() {
+    let dir = TempDir::new("retain-none");
+    retention_db(&dir);
+
+    let (mut child, _stdout, _stderr, _addr) = watch_udp(&["--db", &dir.db()]);
+    let _cleanup = KillOnDrop(child.id());
+    interrupt(&child);
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+
+    assert_eq!(search_lines(&dir.db(), &["events"]).len(), 2);
+}
+
+#[test]
+fn retain_days_needs_a_database_and_at_least_one_day() {
+    let dir = TempDir::new("retain-invalid");
+    let db = dir.db();
+    let cases = [
+        (
+            vec!["--retain-days", "30"],
+            "required arguments were not provided:\n  --db <PATH>",
+        ),
+        (
+            vec!["--db", &db, "--retain-days", "0"],
+            "invalid value '0' for '--retain-days <DAYS>'",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = minisiem(&[&["watch", "--syslog-udp", "127.0.0.1:0"], &args[..]].concat());
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(stderr(&output).contains(expected), "stderr: {}", stderr(&output));
+    }
+    assert!(!std::path::Path::new(&db).exists());
+}
