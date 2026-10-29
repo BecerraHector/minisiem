@@ -2,7 +2,7 @@
 
 mod console;
 
-pub use console::ConsoleSink;
+pub use console::{ConsoleSink, EventLine};
 
 use std::io;
 

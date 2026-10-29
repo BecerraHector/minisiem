@@ -851,3 +851,212 @@ impl Drop for KillOnDrop {
         }
     }
 }
+
+/// A database holding what batch mode kept of `lines`, with `--threshold 2`.
+fn search_db(dir: &TempDir, lines: &[String]) {
+    let log = dir.0.join("input.log");
+    std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+    let output = minisiem(&["--threshold", "2", "--db", &dir.db(), log.to_str().unwrap()]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+}
+
+fn frame(time: &str, host: &str, message: &str) -> String {
+    format!("<38>1 {time} {host} sshd 1 - - {message}")
+}
+
+fn search_fixture() -> Vec<String> {
+    vec![
+        frame(
+            "2026-10-20T08:00:00Z",
+            "srv01",
+            "Failed password for root from 203.0.113.7 port 1 ssh2",
+        ),
+        frame(
+            "2026-10-21T09:00:00Z",
+            "srv02",
+            "Failed password for admin from 198.51.100.2 port 2 ssh2",
+        ),
+        frame(
+            "2026-10-22T10:00:00Z",
+            "srv01",
+            "Accepted password for root from 198.51.100.2 port 3 ssh2",
+        ),
+    ]
+}
+
+const E1: &str = "2026-10-20T08:00:00+00:00 host=srv01 process=sshd src=203.0.113.7 user=root event_kind=failed_login \
+                  message=\"Failed password for root from 203.0.113.7 port 1 ssh2\"";
+const E2: &str = "2026-10-21T09:00:00+00:00 host=srv02 process=sshd src=198.51.100.2 user=admin event_kind=failed_login \
+                  message=\"Failed password for admin from 198.51.100.2 port 2 ssh2\"";
+const E3: &str = "2026-10-22T10:00:00+00:00 host=srv01 process=sshd src=198.51.100.2 user=root \
+                  event_kind=successful_login message=\"Accepted password for root from 198.51.100.2 port 3 ssh2\"";
+
+fn search(db: &str, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["search", "--db", db])
+        .args(args)
+        .env("TZ", "UTC")
+        .output()
+        .unwrap()
+}
+
+fn search_lines(db: &str, args: &[&str]) -> Vec<String> {
+    let output = search(db, args);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    stdout(&output).lines().map(str::to_owned).collect()
+}
+
+#[test]
+fn search_lists_events_oldest_first() {
+    let dir = TempDir::new("search-all");
+    search_db(&dir, &search_fixture());
+
+    assert_eq!(search_lines(&dir.db(), &["events"]), [E1, E2, E3]);
+}
+
+#[test]
+fn search_filters_events_by_ip_user_host_and_kind() {
+    let dir = TempDir::new("search-filters");
+    search_db(&dir, &search_fixture());
+
+    assert_eq!(search_lines(&dir.db(), &["events", "--ip", "198.51.100.2"]), [E2, E3]);
+    assert_eq!(search_lines(&dir.db(), &["events", "--user", "root"]), [E1, E3]);
+    assert_eq!(search_lines(&dir.db(), &["events", "--host", "srv02"]), [E2]);
+    assert_eq!(search_lines(&dir.db(), &["events", "--kind", "successful_login"]), [E3]);
+    assert_eq!(
+        search_lines(&dir.db(), &["events", "--ip", "198.51.100.2", "--user", "root"]),
+        [E3]
+    );
+}
+
+#[test]
+fn search_since_and_until_take_a_time_or_a_date() {
+    let dir = TempDir::new("search-times");
+    search_db(&dir, &search_fixture());
+
+    assert_eq!(
+        search_lines(&dir.db(), &["events", "--since", "2026-10-21T09:00:00Z"]),
+        [E2, E3]
+    );
+    assert_eq!(
+        search_lines(&dir.db(), &["events", "--until", "2026-10-21T09:00:00Z"]),
+        [E1, E2]
+    );
+    // A date is midnight, local time (UTC here).
+    assert_eq!(
+        search_lines(&dir.db(), &["events", "--since", "2026-10-21", "--until", "2026-10-22"]),
+        [E2]
+    );
+}
+
+#[test]
+fn search_since_takes_an_age() {
+    let dir = TempDir::new("search-age");
+    let recent = (chrono::Utc::now() - chrono::Duration::hours(2))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let old = (chrono::Utc::now() - chrono::Duration::days(3))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    search_db(
+        &dir,
+        &[
+            frame(&old, "srv01", "Failed password for root from 203.0.113.7 port 1 ssh2"),
+            frame(
+                &recent,
+                "srv01",
+                "Failed password for root from 203.0.113.8 port 2 ssh2",
+            ),
+        ],
+    );
+
+    let lines = search_lines(&dir.db(), &["events", "--since", "1d"]);
+    assert_eq!(lines.len(), 1, "lines: {lines:?}");
+    assert!(lines[0].contains("src=203.0.113.8"), "lines: {lines:?}");
+    assert_eq!(search_lines(&dir.db(), &["events", "--since", "4d"]).len(), 2);
+    assert_eq!(search_lines(&dir.db(), &["events", "--until", "1d"]).len(), 1);
+}
+
+#[test]
+fn search_lists_alerts_as_the_console_prints_them() {
+    let dir = TempDir::new("search-alerts");
+    let mut lines = search_fixture();
+    lines.push(frame(
+        "2026-10-22T10:05:00Z",
+        "srv01",
+        "Failed password for root from 203.0.113.7 port 4 ssh2",
+    ));
+    let log = dir.0.join("input.log");
+    std::fs::write(&log, lines.join("\n") + "\n").unwrap();
+    let batch = minisiem(&[
+        "--threshold",
+        "2",
+        "--window",
+        "604800",
+        "--db",
+        &dir.db(),
+        log.to_str().unwrap(),
+    ]);
+    let printed: Vec<String> = stdout(&batch).lines().map(str::to_owned).collect();
+    assert_eq!(printed.len(), 1, "alerts: {printed:?}");
+
+    assert_eq!(search_lines(&dir.db(), &["alerts"]), printed);
+    assert_eq!(
+        search_lines(&dir.db(), &["alerts", "--ip", "203.0.113.7", "--host", "srv01"]),
+        printed
+    );
+    assert!(search_lines(&dir.db(), &["alerts", "--ip", "198.51.100.2"]).is_empty());
+    assert!(search_lines(&dir.db(), &["alerts", "--until", "2026-10-22T10:04:59Z"]).is_empty());
+}
+
+#[test]
+fn search_refuses_event_only_filters_for_alerts() {
+    let dir = TempDir::new("search-alert-filters");
+    search_db(&dir, &search_fixture());
+
+    for filter in [["--user", "root"], ["--kind", "failed_login"]] {
+        let output = search(&dir.db(), &["alerts", filter[0], filter[1]]);
+        assert_eq!(output.status.code(), Some(2), "filter: {filter:?}");
+        assert!(
+            stderr(&output).contains(&format!("{} only filters events", filter[0])),
+            "stderr: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn search_rejects_invalid_filters() {
+    let dir = TempDir::new("search-invalid");
+    search_db(&dir, &search_fixture());
+
+    for args in [
+        ["events", "--since", "yesterday"],
+        ["events", "--kind", "logout"],
+        ["events", "--ip", "not-an-ip"],
+    ] {
+        let output = search(&dir.db(), &args);
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(stdout(&output).is_empty());
+        assert!(
+            stderr(&output).contains(&format!("invalid value '{}' for '{}", args[2], args[1])),
+            "stderr: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn search_fails_without_creating_a_missing_database() {
+    let dir = TempDir::new("search-missing");
+
+    let output = search(&dir.db(), &["events"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).starts_with(&format!("minisiem: cannot open database {}: ", dir.db())),
+        "stderr: {}",
+        stderr(&output)
+    );
+    assert!(!std::path::Path::new(&dir.db()).exists());
+}
