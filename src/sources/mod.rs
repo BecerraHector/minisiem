@@ -60,6 +60,7 @@ pub struct Outlet {
     waiting: SyncSender<()>,
     control: Sender<Control>,
     dropped: Arc<AtomicU64>,
+    capacity: usize,
 }
 
 /// The receiving side, owned by the pipeline thread.
@@ -82,6 +83,7 @@ pub fn channel(capacity: usize) -> (Outlet, Inlet) {
             waiting: waiting_tx,
             control: control_tx,
             dropped: Arc::clone(&dropped),
+            capacity,
         },
         Inlet {
             events: event_rx,
@@ -90,6 +92,14 @@ pub fn channel(capacity: usize) -> (Outlet, Inlet) {
             dropped,
             capacity,
         },
+    )
+}
+
+/// Announces the first event dropped from a queue of `capacity`.
+fn queue_full_warning(capacity: usize) -> String {
+    format!(
+        "minisiem: warning: event queue full ({capacity}), dropping events: the pipeline cannot keep up, \
+         possibly because of a flood"
     )
 }
 
@@ -103,10 +113,7 @@ impl Outlet {
                 // Dropping events is a blind spot an attacker can cause on
                 // purpose, so the first one is announced, not hidden.
                 if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
-                    eprintln!(
-                        "minisiem: warning: event queue full ({QUEUE_CAPACITY}), dropping events: the pipeline \
-                         cannot keep up, possibly because of a flood"
-                    );
+                    eprintln!("{}", queue_full_warning(self.capacity));
                 }
                 true
             }
@@ -213,6 +220,11 @@ pub fn drain_reporting<S: AlertSink>(
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
+                // The last source may have reported why it stopped after
+                // the control check above.
+                if let Ok(Control::Failed { source, error }) = inlet.control.try_recv() {
+                    return Ok(Stop::SourceFailed { source, error });
+                }
                 return Ok(Stop::SourceFailed {
                     source: "sources".into(),
                     error: "every source disconnected".into(),
@@ -364,6 +376,33 @@ mod tests {
 
         assert!(matches!(stop, Stop::SourceFailed { .. }));
         assert_eq!(pipeline.stats().events, 1);
+    }
+
+    #[test]
+    fn the_queue_full_warning_names_the_queue_size() {
+        assert_eq!(
+            queue_full_warning(2),
+            "minisiem: warning: event queue full (2), dropping events: the pipeline cannot keep up, possibly \
+             because of a flood"
+        );
+    }
+
+    #[test]
+    fn keeps_the_error_of_a_source_that_fails_and_disconnects_while_waiting() {
+        let (outlet, inlet) = channel(10);
+        // Fails once drain is already waiting for events, past its control check.
+        std::thread::spawn(move || {
+            std::thread::sleep(POLL / 2);
+            outlet.fail("journald", "journalctl exited".into());
+        });
+
+        assert_eq!(
+            drain(&inlet, &mut quiet_pipeline()).unwrap(),
+            Stop::SourceFailed {
+                source: "journald".into(),
+                error: "journalctl exited".into()
+            }
+        );
     }
 
     #[test]
