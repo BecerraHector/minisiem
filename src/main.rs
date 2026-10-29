@@ -145,7 +145,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         let udp = SyslogUdp::bind(addr, args.allow_remote_syslog)?;
         eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
         kernel_drops = udp.kernel_drops();
-        udp.spawn(parser(), outlet.clone());
+        udp.spawn(outlet.clone());
     }
     // Kept alive until watching ends: dropping it stops journalctl.
     let _journal = match args.journal {

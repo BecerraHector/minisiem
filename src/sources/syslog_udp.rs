@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Local, Offset, Utc};
 
 use super::Outlet;
 use crate::event::Event;
-use crate::ingestion::LogParser;
+use crate::ingestion::{AutoParser, LogParser};
 
 /// Largest datagram read; longer ones are truncated by the socket.
 const MAX_DATAGRAM: usize = 8 * 1024;
@@ -67,7 +67,7 @@ impl SyslogUdp {
     }
 
     /// Reads datagrams on a new thread until the pipeline is gone.
-    pub fn spawn<P: LogParser + Send + 'static>(self, parser: P, outlet: Outlet) -> JoinHandle<()> {
+    pub fn spawn(self, outlet: Outlet) -> JoinHandle<()> {
         thread::spawn(move || {
             let source = format!("udp://{}", self.local_addr());
             let mut buf = vec![0; MAX_DATAGRAM];
@@ -102,7 +102,7 @@ impl SyslogUdp {
                     }
                 }
                 if let Some(len) = received
-                    && let Some(event) = event_from_datagram(&buf[..len], &parser, Utc::now())
+                    && let Some(event) = event_from_datagram(&buf[..len], Utc::now())
                     && !outlet.event(event)
                 {
                     return;
@@ -141,7 +141,11 @@ fn drops_for_inode(table: &str, inode: u64) -> Option<u64> {
 }
 
 /// Parses one datagram, stamping the event with when it was `received`.
-pub fn event_from_datagram(datagram: &[u8], parser: &dyn LogParser, received: DateTime<Utc>) -> Option<Event> {
+pub fn event_from_datagram(datagram: &[u8], received: DateTime<Utc>) -> Option<Event> {
+    // Classic syslog dates lack the year and offset: take the arrival's, so a
+    // long watch keeps up with New Year and DST (and accepts leap days).
+    let local = received.with_timezone(&Local);
+    let parser = AutoParser::new(local.year(), local.offset().fix());
     let text = String::from_utf8_lossy(datagram);
     let mut event = parser.parse(text.trim_end_matches(['\n', '\r', '\0']))?;
     event.timestamp = received;
@@ -151,12 +155,7 @@ pub fn event_from_datagram(datagram: &[u8], parser: &dyn LogParser, received: Da
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ingestion::AutoParser;
-    use chrono::{FixedOffset, TimeZone};
-
-    fn parser() -> AutoParser {
-        AutoParser::new(2026, FixedOffset::east_opt(0).unwrap())
-    }
+    use chrono::TimeZone;
 
     #[test]
     fn stamps_events_with_arrival_time_not_the_claimed_one() {
@@ -165,7 +164,7 @@ mod tests {
         let datagram =
             b"<38>1 2099-01-01T00:00:00Z srv01 sshd 1 - - Failed password for root from 203.0.113.7 port 1 ssh2\n";
 
-        let event = event_from_datagram(datagram, &parser(), received).unwrap();
+        let event = event_from_datagram(datagram, received).unwrap();
 
         assert_eq!(event.timestamp, received);
         assert_eq!(event.user, "root");
@@ -177,15 +176,26 @@ mod tests {
         let mut datagram = b"<38>Oct 22 10:00:00 srv01 sshd[1]: Invalid user \xff from 203.0.113.7 port 1".to_vec();
         datagram.extend(b"\r\n\0");
 
-        let event = event_from_datagram(&datagram, &parser(), received).unwrap();
+        let event = event_from_datagram(&datagram, received).unwrap();
 
         assert_eq!(event.user, "\u{fffd}");
     }
 
     #[test]
+    fn completes_syslog_dates_with_the_arrival_year() {
+        // Watch may have started in 2027, a year without one.
+        let received = Utc.with_ymd_and_hms(2028, 2, 29, 12, 0, 0).unwrap();
+        let datagram = b"<38>Feb 29 12:00:00 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
+
+        let event = event_from_datagram(datagram, received);
+
+        assert_eq!(event.map(|event| event.timestamp), Some(received));
+    }
+
+    #[test]
     fn ignores_datagrams_that_are_not_sshd_events() {
-        assert_eq!(event_from_datagram(b"", &parser(), Utc::now()), None);
-        assert_eq!(event_from_datagram(b"<38>hello", &parser(), Utc::now()), None);
+        assert_eq!(event_from_datagram(b"", Utc::now()), None);
+        assert_eq!(event_from_datagram(b"<38>hello", Utc::now()), None);
     }
 
     #[test]
@@ -210,7 +220,7 @@ mod tests {
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let addr = udp.local_addr();
         let (outlet, inlet) = super::super::channel(10);
-        udp.spawn(parser(), outlet);
+        udp.spawn(outlet);
 
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         sender.send_to(b"<38>hello", addr).unwrap();
