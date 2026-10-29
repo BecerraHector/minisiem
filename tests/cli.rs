@@ -232,20 +232,22 @@ fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
         .unwrap_or_else(|| panic!("unexpected startup line: {listening}"))
         .to_string();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    // Far faster than one thread can read and parse: the socket buffer fills.
+    // Far faster than one thread can read and parse: the socket buffer fills,
+    // however big it is, and the reader warns within a second.
     let frame = "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
-    for _ in 0..300_000 {
-        sender.send_to(frame.as_bytes(), &addr).unwrap();
-    }
-
-    // The queue may fill too, and its warning may come first.
     let warning = format!(
         "minisiem: warning: the kernel is dropping datagrams sent to udp://{addr}: they arrive faster than \
          minisiem reads them, possibly because of a flood"
     );
-    std::iter::repeat_with(|| next_line(&stderr))
-        .find(|line| *line == warning)
-        .unwrap();
+    let mut sent = 0u64;
+    // The queue may fill too, and its warning may come first.
+    while !stderr.try_iter().any(|line| line == warning) {
+        assert!(sent < 20_000_000, "the kernel never dropped a datagram");
+        for _ in 0..50_000 {
+            sender.send_to(frame.as_bytes(), &addr).unwrap();
+        }
+        sent += 50_000;
+    }
     interrupt(&child);
     assert_eq!(child.wait().unwrap().code(), Some(0));
     let summary = std::iter::repeat_with(|| next_line(&stderr))
@@ -260,7 +262,7 @@ fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
         .and_then(|rest| rest.split(' ').next()?.parse().ok())
         .unwrap_or_else(|| panic!("unexpected summary {summary}"));
     assert!(kernel_dropped > 0, "{summary}");
-    assert!(events + kernel_dropped <= 300_000, "{summary}");
+    assert!(events + kernel_dropped <= sent, "{summary}");
 }
 
 #[test]

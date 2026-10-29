@@ -284,13 +284,9 @@ mod tests {
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let drops = udp.kernel_drops().expect("Linux exposes socket drops");
         assert_eq!(drops.count(), Some(0));
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
         // Nobody reads: the receive buffer fills and the kernel drops the rest.
-        let sent = 20_000;
-        for _ in 0..sent {
-            sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
-        }
+        let sent = overflow(udp.local_addr(), &drops);
         udp.socket.set_nonblocking(true).unwrap();
         let mut buf = [0; 512];
         let received = std::iter::from_fn(|| udp.socket.recv(&mut buf).ok()).count() as u64;
@@ -311,10 +307,7 @@ mod tests {
         // The reader stops once the pipeline is gone, before the summary.
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let drops = udp.kernel_drops().unwrap();
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-        for _ in 0..20_000 {
-            sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
-        }
+        overflow(udp.local_addr(), &drops);
 
         drop(udp);
 
