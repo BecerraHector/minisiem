@@ -5,16 +5,18 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use regex::Regex;
 
 use super::LogParser;
+use super::sudo::sudo_event;
 use crate::event::{Event, EventKind, LogSource};
 
 /// OpenSSH server processes. Since OpenSSH 9.8 per-connection messages come
 /// from `sshd-session`; 10.0 split authentication into `sshd-auth`.
 pub const SSHD_PROCESSES: [&str; 3] = ["sshd", "sshd-session", "sshd-auth"];
 
-/// `<timestamp> <host> <sshd|sshd-session|sshd-auth>[pid]: <message>`
+/// `<timestamp> <host> <sshd|sshd-session|sshd-auth>[pid]: <message>`, or
+/// `sudo:`, which logs without its pid.
 static HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2})) (?P<host>\S+) (?P<process>sshd(?:-session|-auth)?)\[\d+\]: (?P<message>.+)$",
+        r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\S+)|(?P<bsd>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2})) (?P<host>\S+) (?:(?P<process>sshd(?:-session|-auth)?)\[\d+\]|(?P<sudo>sudo)(?:\[\d+\])?): (?P<message>.+)$",
     )
     .unwrap()
 });
@@ -38,17 +40,17 @@ static INVALID_USER: LazyLock<Regex> =
 static ACCEPTED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^Accepted \S+ for (?P<user>\S+) from (?P<ip>\S+) port \d+").unwrap());
 
-/// Parses OpenSSH server lines from syslog files (`/var/log/auth.log`,
+/// Parses OpenSSH server and sudo lines from syslog files (`/var/log/auth.log`,
 /// `/var/log/secure`) or `journalctl -o short-iso` output.
 ///
 /// Classic syslog timestamps (`Oct 22 10:15:32`) carry neither year nor
 /// timezone, so both are supplied by the caller.
-pub struct SshdParser {
+pub struct SyslogParser {
     year: i32,
     offset: FixedOffset,
 }
 
-impl SshdParser {
+impl SyslogParser {
     pub fn new(year: i32, offset: FixedOffset) -> Self {
         Self { year, offset }
     }
@@ -97,19 +99,24 @@ pub(super) fn sshd_event(timestamp: DateTime<Utc>, host: &str, process: &str, me
         kind,
         user: user.to_string(),
         src_ip: Some(src_ip),
+        target_user: None,
+        command: None,
         message: message.to_string(),
         logsource: LogSource::new("linux", "sshd"),
     })
 }
 
-impl LogParser for SshdParser {
+impl LogParser for SyslogParser {
     fn parse(&self, line: &str) -> Option<Event> {
         let header = HEADER.captures(line)?;
         let timestamp = self.parse_timestamp(
             header.name("iso").map(|m| m.as_str()),
             header.name("bsd").map(|m| m.as_str()),
         )?;
-        sshd_event(timestamp, &header["host"], &header["process"], &header["message"])
+        match header.name("sudo") {
+            Some(sudo) => sudo_event(timestamp, &header["host"], sudo.as_str(), &header["message"]),
+            None => sshd_event(timestamp, &header["host"], &header["process"], &header["message"]),
+        }
     }
 }
 
@@ -118,8 +125,8 @@ mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
 
-    fn parser() -> SshdParser {
-        SshdParser::new(2026, FixedOffset::west_opt(5 * 3600).unwrap())
+    fn parser() -> SyslogParser {
+        SyslogParser::new(2026, FixedOffset::west_opt(5 * 3600).unwrap())
     }
 
     #[test]
@@ -138,6 +145,8 @@ mod tests {
                 kind: EventKind::FailedLogin,
                 user: "root".into(),
                 src_ip: Some("203.0.113.7".parse().unwrap()),
+                target_user: None,
+                command: None,
                 message: "Failed password for root from 203.0.113.7 port 52211 ssh2".into(),
                 logsource: LogSource::new("linux", "sshd"),
             }
@@ -215,6 +224,31 @@ mod tests {
         let event = parser().parse(line).unwrap();
 
         assert_eq!(event.src_ip, Some("2001:db8::7".parse::<std::net::IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn parses_sudo_lines_with_or_without_a_pid() {
+        for line in [
+            "Oct 22 10:15:32 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/id",
+            "2026-10-22T10:15:32+00:00 srv01 sudo[4242]:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/id",
+        ] {
+            let event = parser().parse(line).unwrap_or_else(|| panic!("not parsed: {line}"));
+            assert_eq!(event.kind, EventKind::SudoCommand, "{line}");
+            assert_eq!(event.process, "sudo");
+            assert_eq!(event.user, "hector");
+            assert_eq!(event.command.as_deref(), Some("/usr/bin/id"));
+        }
+    }
+
+    #[test]
+    fn still_needs_a_pid_for_sshd_and_ignores_other_processes() {
+        for line in [
+            "Oct 22 10:15:32 srv01 sshd: Failed password for root from 203.0.113.7 port 22 ssh2",
+            "Oct 22 10:15:32 srv01 sudoedit:   hector : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/id",
+            "Oct 22 10:15:32 srv01 su:   hector : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/usr/bin/id",
+        ] {
+            assert_eq!(parser().parse(line), None, "{line}");
+        }
     }
 
     #[test]

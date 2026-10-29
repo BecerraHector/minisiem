@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use crate::alert::{Alert, Evidence};
     use crate::detection::SshBruteForce;
-    use crate::ingestion::SshdParser;
+    use crate::ingestion::SyslogParser;
     use chrono::{Duration, FixedOffset};
 
     #[derive(Default)]
@@ -131,7 +131,7 @@ mod tests {
                     .as_bytes(),
             );
         }
-        let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
+        let parser = SyslogParser::new(2026, FixedOffset::east_opt(0).unwrap());
         let mut pipeline = Pipeline::new(
             vec![Box::new(SshBruteForce::new(2, Duration::seconds(60)))],
             CollectSink::default(),
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn processes_events_one_at_a_time_without_counting_lines() {
-        let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
+        let parser = SyslogParser::new(2026, FixedOffset::east_opt(0).unwrap());
         let event = parser
             .parse("Oct 22 10:00:00 srv01 sshd[2]: Failed password for root from 203.0.113.7 port 1 ssh2")
             .unwrap();
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn emits_every_alert_a_detector_returns_in_order() {
         let input = b"Oct 22 10:00:00 srv01 sshd[2]: Failed password for root from 203.0.113.7 port 1 ssh2\n";
-        let parser = SshdParser::new(2026, FixedOffset::east_opt(0).unwrap());
+        let parser = SyslogParser::new(2026, FixedOffset::east_opt(0).unwrap());
         let mut pipeline = Pipeline::new(vec![Box::new(TwoAlerts)], CollectSink::default());
 
         pipeline.run(input.as_slice(), &parser).unwrap();

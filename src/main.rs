@@ -17,7 +17,7 @@ use minisiem::alerting::{AlertSink, ConsoleSink, EventLine};
 use minisiem::detection::sigma::SigmaEngine;
 use minisiem::detection::{Detector, SshBruteForce};
 use minisiem::event::EventKind;
-use minisiem::ingestion::{AutoParser, SSHD_PROCESSES};
+use minisiem::ingestion::{AutoParser, FOLLOWED_PROCESSES};
 use minisiem::pipeline::{Archive, Pipeline, Stats};
 use minisiem::rule_loading;
 use minisiem::sources::{self, JournalFollow, QUEUE_CAPACITY, Stop, SyslogUdp, drain_reporting};
@@ -307,7 +307,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
     let _journal = match args.journal {
         true => {
             let journal = JournalFollow::start(outlet.clone())?;
-            eprintln!("minisiem: following journald ({})", SSHD_PROCESSES.join(", "));
+            eprintln!("minisiem: following journald ({})", FOLLOWED_PROCESSES.join(", "));
             Some(journal)
         }
         false => None,

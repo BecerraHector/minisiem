@@ -13,6 +13,13 @@ pub enum EventKind {
     InvalidUser,
     /// An authentication attempt succeeded.
     SuccessfulLogin,
+    /// sudo ran a command as another user.
+    SudoCommand,
+    /// sudo refused a command: the user is not in sudoers, or the command
+    /// is not allowed.
+    SudoDenied,
+    /// sudo gave up after wrong passwords.
+    SudoFailedPassword,
 }
 
 impl EventKind {
@@ -22,13 +29,19 @@ impl EventKind {
             EventKind::FailedLogin => "failed_login",
             EventKind::InvalidUser => "invalid_user",
             EventKind::SuccessfulLogin => "successful_login",
+            EventKind::SudoCommand => "sudo_command",
+            EventKind::SudoDenied => "sudo_denied",
+            EventKind::SudoFailedPassword => "sudo_failed_password",
         }
     }
 
-    pub const ALL: [EventKind; 3] = [
+    pub const ALL: [EventKind; 6] = [
         EventKind::FailedLogin,
         EventKind::InvalidUser,
         EventKind::SuccessfulLogin,
+        EventKind::SudoCommand,
+        EventKind::SudoDenied,
+        EventKind::SudoFailedPassword,
     ];
 
     /// The kind named `name` (see [`EventKind::as_str`]).
@@ -66,6 +79,12 @@ pub struct Event {
     pub user: String,
     /// Where the event came from, for sources that know it (sshd).
     pub src_ip: Option<IpAddr>,
+    /// The user a command ran as (sudo's `USER=`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_user: Option<String>,
+    /// The command line that ran (sudo's `COMMAND=`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// The original log message, without the syslog header.
     pub message: String,
     pub logsource: LogSource,
@@ -73,7 +92,15 @@ pub struct Event {
 
 impl Event {
     /// Field names detection rules can match on.
-    pub const FIELDS: [&'static str; 5] = ["host", "process", "user", "src_ip", "event_kind"];
+    pub const FIELDS: [&'static str; 7] = [
+        "host",
+        "process",
+        "user",
+        "src_ip",
+        "event_kind",
+        "target_user",
+        "command",
+    ];
 
     /// Value of one of [`Event::FIELDS`], or `None` for unknown names.
     pub fn field(&self, name: &str) -> Option<String> {
@@ -83,6 +110,8 @@ impl Event {
             "user" => Some(self.user.clone()),
             "src_ip" => self.src_ip.map(|ip| ip.to_string()),
             "event_kind" => Some(self.kind.as_str().to_string()),
+            "target_user" => self.target_user.clone(),
+            "command" => self.command.clone(),
             _ => None,
         }
     }

@@ -370,7 +370,7 @@ fn ctrl_c_in_a_terminal_does_not_reach_journalctl() {
     let stderr = lines_of(child.stderr.take().unwrap());
     assert_eq!(
         next_line(&stderr),
-        "minisiem: following journald (sshd, sshd-session, sshd-auth)"
+        "minisiem: following journald (sshd, sshd-session, sshd-auth, sudo)"
     );
     let journalctl_group = (0..200)
         .find_map(|_| {
@@ -415,7 +415,7 @@ fn watch_follows_journald_and_stops_cleanly_on_interrupt() {
 
     assert_eq!(
         next_line(&stderr),
-        "minisiem: following journald (sshd, sshd-session, sshd-auth)"
+        "minisiem: following journald (sshd, sshd-session, sshd-auth, sudo)"
     );
     let alert = next_line(&stdout);
     assert!(
@@ -1130,4 +1130,45 @@ fn retain_days_needs_a_database_and_at_least_one_day() {
         assert!(stderr(&output).contains(expected), "stderr: {}", stderr(&output));
     }
     assert!(!std::path::Path::new(&db).exists());
+}
+
+const SUDO_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sudo.log");
+
+#[test]
+fn keeps_sudo_commands_refusals_and_password_failures() {
+    let dir = TempDir::new("sudo");
+
+    let output = minisiem(&["--db", &dir.db(), SUDO_FIXTURE]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).is_empty(), "stdout: {}", stdout(&output));
+    assert!(
+        stderr(&output).contains("lines=5 events=3 alerts=0"),
+        "stderr: {}",
+        stderr(&output)
+    );
+    let lines = search_lines(&dir.db(), &["events"]);
+    let kinds: Vec<&str> = lines
+        .iter()
+        .map(|line| line.split(" event_kind=").nth(1).unwrap().split(' ').next().unwrap())
+        .collect();
+    assert_eq!(kinds, ["sudo_command", "sudo_denied", "sudo_failed_password"]);
+    assert!(
+        lines[1].contains(" host=srv01 process=sudo src=- user=bob "),
+        "{}",
+        lines[1]
+    );
+    assert_eq!(
+        search_lines(&dir.db(), &["events", "--kind", "sudo_denied", "--user", "bob"]).len(),
+        1
+    );
+    let stored: (String, String) = rusqlite::Connection::open(dir.db())
+        .unwrap()
+        .query_row(
+            "SELECT target_user, command FROM events WHERE kind = 'sudo_command'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, ("root".into(), "/usr/bin/systemctl restart nginx".into()));
 }

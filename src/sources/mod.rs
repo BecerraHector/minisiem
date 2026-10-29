@@ -288,6 +288,8 @@ mod tests {
             kind: EventKind::FailedLogin,
             user: "root".into(),
             src_ip: Some("203.0.113.7".parse().unwrap()),
+            target_user: None,
+            command: None,
             message: String::new(),
             logsource: LogSource::new("linux", "sshd"),
         }

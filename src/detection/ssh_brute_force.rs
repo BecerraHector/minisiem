@@ -124,6 +124,8 @@ mod tests {
             kind,
             user: user.into(),
             src_ip: Some(ip.parse().unwrap()),
+            target_user: None,
+            command: None,
             message: String::new(),
             logsource: LogSource::new("linux", "sshd"),
         }
