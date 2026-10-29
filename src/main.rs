@@ -138,7 +138,7 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs) -> Result<(), Stri
 /// Watch mode: run until interrupted or until a source fails.
 fn watch(args: &WatchArgs) -> Result<(), String> {
     let mut detectors = args.detection.detectors()?;
-    if std::env::var_os(TEST_PANIC_ENV).is_some() {
+    if std::env::var_os(TEST_PANIC_ENV).is_some_and(|value| value == "1") {
         detectors.push(Box::new(PanicOnEvent));
     }
     let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
@@ -278,8 +278,9 @@ impl Drop for ReportPanic {
 /// How long Ctrl+C waits for detection to stop before giving up on it.
 const STOP_GRACE: StdDuration = StdDuration::from_secs(2);
 
-/// Makes watch's detection panic on its first event, so tests can check
-/// how watch ends when a detector panics. Not for use outside tests.
+/// Set to `1`, makes watch's detection panic on its first event, so tests
+/// can check how watch ends when a detector panics. Any other value, empty
+/// included, is ignored. Not for use outside tests.
 const TEST_PANIC_ENV: &str = "MINISIEM_TEST_PANIC";
 
 /// A detector that panics, enabled by [`TEST_PANIC_ENV`].

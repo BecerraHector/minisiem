@@ -94,6 +94,7 @@ fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::Exit
 /// kernel names that wait `pipe_write`, `pipe_wait_writable` or
 /// `anon_pipe_write`, depending on its version; read-side waits
 /// (`pipe_wait_readable`, and `pipe_wait` before Linux 5.5) do not count.
+/// Other names, or a `wchan` reading `0`, give `false`.
 fn blocked_writing_to_a_pipe(child: &Child) -> bool {
     let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", child.id())) else {
         return false;
@@ -122,11 +123,12 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
         .strip_prefix("minisiem: listening for syslog on udp://")
         .unwrap_or_else(|| panic!("unexpected startup line: {listening}"));
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    // One alert per source IP, in batches, until writing an alert blocks:
-    // whatever the pipe's size or how many datagrams the kernel drops.
+    // One alert per source IP, in batches, until writing an alert blocks.
+    // A kernel with another name for that wait only makes it slower: 10,000
+    // alerts are far more than a pipe holds. Either way, the grace-period
+    // message asserted below proves detection was stuck writing.
     let mut ip = 0u32;
-    while !blocked_writing_to_a_pipe(&child) {
-        assert!(ip < 50_000, "stdout never filled up");
+    while ip < 10_000 && !blocked_writing_to_a_pipe(&child) {
         for _ in 0..100 {
             let frame = format!(
                 "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 10.{}.{}.{} port 1 ssh2",
@@ -161,15 +163,18 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
 }
 
-#[test]
-fn watch_exits_with_101_when_detection_panics() {
+/// Starts `watch --syslog-udp --threshold 1` with `MINISIEM_TEST_PANIC` set
+/// to `panic`, sends it one sshd failure and returns it with its stdout and
+/// stderr lines.
+fn watch_one_event_with_test_panic(panic: &str) -> (Child, Receiver<String>, Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
-        .args(["watch", "--syslog-udp", "127.0.0.1:0"])
-        .env("MINISIEM_TEST_PANIC", "1")
-        .stdout(Stdio::null())
+        .args(["watch", "--syslog-udp", "127.0.0.1:0", "--threshold", "1"])
+        .env("MINISIEM_TEST_PANIC", panic)
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let stdout = lines_of(child.stdout.take().unwrap());
     let stderr = lines_of(child.stderr.take().unwrap());
     let listening = next_line(&stderr);
     let addr = listening
@@ -184,12 +189,36 @@ fn watch_exits_with_101_when_detection_panics() {
             &addr,
         )
         .unwrap();
+    (child, stdout, stderr)
+}
+
+#[test]
+fn watch_exits_with_101_when_detection_panics() {
+    let (mut child, _stdout, stderr) = watch_one_event_with_test_panic("1");
     let status = wait_at_most(&mut child, Duration::from_secs(10));
 
     assert_eq!(status.map(|s| s.code()), Some(Some(101)), "a panic must not hang watch");
     let reported = std::iter::from_fn(|| stderr.recv_timeout(Duration::from_secs(1)).ok())
         .any(|line| line.contains("panicked") || line.contains("MINISIEM_TEST_PANIC is set"));
     assert!(reported, "the panic message reaches stderr");
+}
+
+#[test]
+fn watch_ignores_a_test_panic_variable_not_set_to_1() {
+    for value in ["", "0"] {
+        let (mut child, stdout, stderr) = watch_one_event_with_test_panic(value);
+        // The alert shows the event went through detection without a panic.
+        let alert = next_line(&stdout);
+        assert!(alert.contains("src=203.0.113.7"), "{alert}");
+
+        interrupt(&child);
+        assert_eq!(
+            wait_at_most(&mut child, Duration::from_secs(10)).map(|s| s.code()),
+            Some(Some(0)),
+            "MINISIEM_TEST_PANIC={value:?}"
+        );
+        assert_eq!(next_line(&stderr), "minisiem: watch: events=1 alerts=1");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -209,20 +238,22 @@ fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
         .unwrap_or_else(|| panic!("unexpected startup line: {listening}"))
         .to_string();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    // Far faster than one thread can read and parse: the socket buffer fills.
+    // Far faster than one thread can read and parse: the socket buffer fills,
+    // however big it is, and the reader warns within a second.
     let frame = "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2";
-    for _ in 0..300_000 {
-        sender.send_to(frame.as_bytes(), &addr).unwrap();
-    }
-
-    // The queue may fill too, and its warning may come first.
     let warning = format!(
         "minisiem: warning: the kernel is dropping datagrams sent to udp://{addr}: they arrive faster than \
          minisiem reads them, possibly because of a flood"
     );
-    std::iter::repeat_with(|| next_line(&stderr))
-        .find(|line| *line == warning)
-        .unwrap();
+    let mut sent = 0u64;
+    // The queue may fill too, and its warning may come first.
+    while !stderr.try_iter().any(|line| line == warning) {
+        assert!(sent < 20_000_000, "the kernel never dropped a datagram");
+        for _ in 0..50_000 {
+            sender.send_to(frame.as_bytes(), &addr).unwrap();
+        }
+        sent += 50_000;
+    }
     interrupt(&child);
     assert_eq!(child.wait().unwrap().code(), Some(0));
     let summary = std::iter::repeat_with(|| next_line(&stderr))
@@ -237,7 +268,7 @@ fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {
         .and_then(|rest| rest.split(' ').next()?.parse().ok())
         .unwrap_or_else(|| panic!("unexpected summary {summary}"));
     assert!(kernel_dropped > 0, "{summary}");
-    assert!(events + kernel_dropped <= 300_000, "{summary}");
+    assert!(events + kernel_dropped <= sent, "{summary}");
 }
 
 #[test]

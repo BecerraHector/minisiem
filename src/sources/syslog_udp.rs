@@ -2,7 +2,7 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,8 @@ const DROPS_CHECK: Duration = Duration::from_secs(1);
 /// default, and arrival time instead of the claimed one.
 pub struct SyslogUdp {
     socket: UdpSocket,
+    /// The kernel's drop counter for the socket, where the system has one.
+    drops: Option<KernelDrops>,
 }
 
 impl SyslogUdp {
@@ -36,7 +38,8 @@ impl SyslogUdp {
             ));
         }
         let socket = UdpSocket::bind(addr).map_err(|e| format!("cannot listen on udp://{addr}: {e}"))?;
-        Ok(Self { socket })
+        let drops = KernelDrops::of(&socket);
+        Ok(Self { socket, drops })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -45,25 +48,7 @@ impl SyslogUdp {
 
     /// The kernel's drop counter for this socket, where the system exposes it.
     pub fn kernel_drops(&self) -> Option<KernelDrops> {
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::fs::MetadataExt;
-
-            let fd = std::fs::metadata(format!("/proc/self/fd/{}", self.socket.as_raw_fd())).ok()?;
-            let table = match self.local_addr() {
-                SocketAddr::V4(_) => "/proc/net/udp",
-                SocketAddr::V6(_) => "/proc/net/udp6",
-            };
-            let drops = KernelDrops {
-                inode: fd.ino(),
-                table,
-                _socket: Arc::new(self.socket.try_clone().ok()?),
-            };
-            drops.count().map(|_| drops)
-        }
-        #[cfg(not(target_os = "linux"))]
-        None
+        self.drops.clone()
     }
 
     /// Reads datagrams on a new thread until the pipeline is gone.
@@ -112,19 +97,65 @@ impl SyslogUdp {
     }
 }
 
+impl Drop for SyslogUdp {
+    /// Keeps the final count: closing the socket removes it from the kernel's
+    /// table, and the reader closes it before watch prints its summary.
+    fn drop(&mut self) {
+        if let Some(drops) = &self.drops
+            && let Some(count) = drops.live_count()
+        {
+            let _ = drops.at_close.set(count);
+        }
+    }
+}
+
 /// Datagrams the kernel dropped for one socket because its receive buffer
 /// was full: they never reach minisiem, so only the kernel can count them.
+/// Counted while the socket is open: datagrams sent after minisiem stopped
+/// reading on purpose are not lost events.
 #[derive(Clone, Debug)]
 pub struct KernelDrops {
     inode: u64,
     table: &'static str,
-    /// Keeps the socket, and so its counter, alive once the reader is gone.
-    _socket: Arc<UdpSocket>,
+    /// The count when the socket was closed.
+    at_close: Arc<OnceLock<u64>>,
 }
 
 impl KernelDrops {
-    /// The current count, or `None` if it cannot be read.
+    #[cfg(target_os = "linux")]
+    fn of(socket: &UdpSocket) -> Option<Self> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let fd = std::fs::metadata(format!("/proc/self/fd/{}", socket.as_raw_fd())).ok()?;
+        let table = match socket.local_addr().ok()? {
+            SocketAddr::V4(_) => "/proc/net/udp",
+            SocketAddr::V6(_) => "/proc/net/udp6",
+        };
+        let drops = Self {
+            inode: fd.ino(),
+            table,
+            at_close: Arc::default(),
+        };
+        drops.live_count().map(|_| drops)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn of(_socket: &UdpSocket) -> Option<Self> {
+        None
+    }
+
+    /// The current count, or the final one once the socket is closed;
+    /// `None` if it cannot be read.
     pub fn count(&self) -> Option<u64> {
+        if let Some(count) = self.at_close.get() {
+            return Some(*count);
+        }
+        // The socket may close between the two reads.
+        self.live_count().or_else(|| self.at_close.get().copied())
+    }
+
+    fn live_count(&self) -> Option<u64> {
         drops_for_inode(&std::fs::read_to_string(self.table).ok()?, self.inode)
     }
 }
@@ -253,13 +284,9 @@ mod tests {
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let drops = udp.kernel_drops().expect("Linux exposes socket drops");
         assert_eq!(drops.count(), Some(0));
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
         // Nobody reads: the receive buffer fills and the kernel drops the rest.
-        let sent = 20_000;
-        for _ in 0..sent {
-            sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
-        }
+        let sent = overflow(udp.local_addr(), &drops);
         udp.socket.set_nonblocking(true).unwrap();
         let mut buf = [0; 512];
         let received = std::iter::from_fn(|| udp.socket.recv(&mut buf).ok()).count() as u64;
@@ -280,13 +307,48 @@ mod tests {
         // The reader stops once the pipeline is gone, before the summary.
         let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
         let drops = udp.kernel_drops().unwrap();
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-        for _ in 0..20_000 {
-            sender.send_to(&[b'x'; 200], udp.local_addr()).unwrap();
-        }
+        overflow(udp.local_addr(), &drops);
 
         drop(udp);
 
         assert!(drops.count().is_some_and(|count| count > 0));
+    }
+
+    /// Sends datagrams nobody reads to `addr` until the kernel drops some,
+    /// whatever the size of the receive buffer; returns how many were sent.
+    #[cfg(target_os = "linux")]
+    fn overflow(addr: SocketAddr, drops: &KernelDrops) -> u64 {
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut sent = 0;
+        while drops.count() == Some(0) {
+            assert!(sent < 10_000_000, "the receive buffer never filled up");
+            for _ in 0..1_000 {
+                sender.send_to(&[b'x'; 200], addr).unwrap();
+            }
+            sent += 1_000;
+        }
+        sent
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stops_counting_once_the_socket_is_closed() {
+        // A flood that goes on while watch stops is not what minisiem lost.
+        let udp = SyslogUdp::bind("127.0.0.1:0".parse().unwrap(), false).unwrap();
+        let drops = udp.kernel_drops().unwrap();
+        let addr = udp.local_addr();
+        overflow(addr, &drops);
+        drop(udp);
+        let at_close = drops.count();
+
+        // Holds the freed port, so the datagrams below reach no other test.
+        let _same_port = UdpSocket::bind(addr).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..20_000 {
+            sender.send_to(&[b'x'; 200], addr).unwrap();
+        }
+
+        assert!(at_close.is_some_and(|count| count > 0));
+        assert_eq!(drops.count(), at_close);
     }
 }
