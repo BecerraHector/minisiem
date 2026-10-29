@@ -2,10 +2,11 @@ use std::fmt;
 use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::event::Event;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
     Informational,
     Low,
@@ -29,14 +30,14 @@ impl fmt::Display for Severity {
 
 /// A MITRE ATT&CK technique, used to tell analysts *what* an alert means.
 /// Sigma tags only carry the ID, so the name is optional.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MitreTechnique {
     pub id: String,
     pub name: Option<String>,
 }
 
 /// Why a rule fired.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Evidence {
     /// Several related events aggregated by a stateful rule.
     Burst {
@@ -61,7 +62,7 @@ pub enum Evidence {
 }
 
 /// The result of a detection rule firing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alert {
     pub rule_id: String,
     pub title: String,

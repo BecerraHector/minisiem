@@ -1,9 +1,11 @@
 use std::net::IpAddr;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// What happened, independent of the log format it came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EventKind {
     /// An authentication attempt was rejected (wrong password, key, etc.).
     FailedLogin,
@@ -25,7 +27,7 @@ impl EventKind {
 }
 
 /// Where an event comes from, using Sigma's `logsource` vocabulary.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogSource {
     pub product: Option<String>,
     pub service: Option<String>,
@@ -44,7 +46,7 @@ impl LogSource {
 
 /// A normalized security event. Every log source is translated into this
 /// shape so detection rules never depend on a specific log format.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub timestamp: DateTime<Utc>,
     pub host: String,
