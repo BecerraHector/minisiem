@@ -341,6 +341,8 @@ mod tests {
         drop(udp);
         let at_close = drops.count();
 
+        // Holds the freed port, so the datagrams below reach no other test.
+        let _same_port = UdpSocket::bind(addr).unwrap();
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         for _ in 0..20_000 {
             sender.send_to(&[b'x'; 200], addr).unwrap();
