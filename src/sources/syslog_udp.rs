@@ -156,8 +156,24 @@ impl KernelDrops {
     }
 
     fn live_count(&self) -> Option<u64> {
-        drops_for_inode(&std::fs::read_to_string(self.table).ok()?, self.inode)
+        read_drops(self.inode, || std::fs::read_to_string(self.table).ok())
     }
+}
+
+/// Reads of the table before deciding a socket is not in it.
+const TABLE_READS: usize = 5;
+
+/// The drops of the socket with `inode`, from tables returned by `read`.
+/// The kernel prints `/proc/net/udp` a page at a time, so sockets opened or
+/// closed meanwhile (by any process) can make one read skip an open
+/// socket's entry: a missing entry is read again before giving up.
+fn read_drops(inode: u64, mut read: impl FnMut() -> Option<String>) -> Option<u64> {
+    for _ in 0..TABLE_READS {
+        if let Some(drops) = drops_for_inode(&read()?, inode) {
+            return Some(drops);
+        }
+    }
+    None
 }
 
 /// The `drops` column of the socket with `inode` in a `/proc/net/udp` table.
@@ -301,6 +317,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rereads_the_table_when_a_socket_open_elsewhere_hides_its_entry() {
+        // Reading /proc/net/udp while other sockets open and close can skip
+        // entries: an open socket can be missing from one read.
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n";
+        let with_socket = format!(
+            "{header}   0: 0100007F:14A2 00000000:0000 07 00000000:00000000 00:00000000 00000000  1000        0 4242 2 0000000000000000 17\n"
+        );
+        let mut reads = vec![header.to_owned(), header.to_owned(), with_socket].into_iter();
+
+        assert_eq!(read_drops(4242, || reads.next()), Some(17));
+    }
+
+    #[test]
+    fn gives_up_when_the_socket_stays_missing() {
+        let header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n";
+        let mut reads = 0;
+
+        assert_eq!(
+            read_drops(4242, || {
+                reads += 1;
+                Some(header.to_owned())
+            }),
+            None
+        );
+        assert_eq!(reads, TABLE_READS);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn keeps_counting_after_the_reader_closed_its_socket() {
@@ -320,7 +364,7 @@ mod tests {
     fn overflow(addr: SocketAddr, drops: &KernelDrops) -> u64 {
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let mut sent = 0;
-        while drops.count() == Some(0) {
+        while drops.count().expect("the socket's drop counter is readable") == 0 {
             assert!(sent < 10_000_000, "the receive buffer never filled up");
             for _ in 0..1_000 {
                 sender.send_to(&[b'x'; 200], addr).unwrap();
