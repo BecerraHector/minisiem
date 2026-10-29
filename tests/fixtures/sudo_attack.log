@@ -1,0 +1,10 @@
+Oct 22 11:00:00 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+Oct 22 11:01:00 srv01 sudo:  mallory : 3 incorrect password attempts ; TTY=pts/2 ; PWD=/home/mallory ; USER=root ; COMMAND=/usr/bin/id
+Oct 22 11:02:00 srv01 sudo:  mallory : 3 incorrect password attempts ; TTY=pts/2 ; PWD=/home/mallory ; USER=root ; COMMAND=/usr/bin/id
+Oct 22 11:03:00 srv01 sudo:   hector : 1 incorrect password attempt ; TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/id
+Oct 22 11:04:00 srv01 sudo:  mallory : 3 incorrect password attempts ; TTY=pts/2 ; PWD=/home/mallory ; USER=root ; COMMAND=/usr/bin/id
+Oct 22 11:05:00 srv01 sudo:  mallory : user NOT in sudoers ; TTY=pts/2 ; PWD=/home/mallory ; USER=root ; COMMAND=/bin/bash
+Oct 22 11:06:00 srv01 sudo:   hector : command not allowed ; TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/vim /etc/shadow
+Oct 22 11:07:00 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/bin/bash
+Oct 22 11:08:00 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=postgres ; COMMAND=/bin/bash
+Oct 22 11:09:00 srv01 sudo:   hector : TTY=pts/0 ; PWD=/home/hector ; USER=root ; COMMAND=/usr/bin/su -

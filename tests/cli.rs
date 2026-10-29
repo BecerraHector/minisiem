@@ -604,7 +604,8 @@ fn shipped_sigma_rules_add_alerts_in_event_order() {
             .map(str::to_owned)
     };
     assert_eq!(first_seen(&alerts[7]), first_seen(&alerts[4]));
-    assert!(stderr(&output).contains(&format!("minisiem: loaded 9 sigma rules from {rules}")));
+    // 9 sshd rules and 4 sudo rules, which never fire on sshd events.
+    assert!(stderr(&output).contains(&format!("minisiem: loaded 13 sigma rules from {rules}")));
     assert!(stderr(&output).contains("alerts=8"));
 }
 
@@ -1171,4 +1172,36 @@ fn keeps_sudo_commands_refusals_and_password_failures() {
         )
         .unwrap();
     assert_eq!(stored, ("root".into(), "/usr/bin/systemctl restart nginx".into()));
+}
+
+#[test]
+fn shipped_sudo_rules_detect_privilege_escalation_attempts() {
+    let rules = concat!(env!("CARGO_MANIFEST_DIR"), "/rules");
+    let attack = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sudo_attack.log");
+
+    let output = minisiem(&["--rules", rules, attack]);
+
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let alerts: Vec<_> = stdout(&output).lines().map(str::to_owned).collect();
+    let expected_prefixes = [
+        // The third summary of failures by one user within 10 minutes;
+        // hector's single failure does not count towards it.
+        "[MEDIUM] sudo password guessing (T1548.003, T1110.001) host=srv01 group.user=mallory events=3",
+        // "command not allowed" is a refusal too, but not this rule's.
+        "[HIGH] sudo by a user not in sudoers (T1548.003) host=srv01 user=mallory event_kind=sudo_denied",
+        "[MEDIUM] Shell as root through sudo (T1548.003) host=srv01 user=hector event_kind=sudo_command",
+        // A shell as postgres is not a root shell.
+        "[MEDIUM] Shell as root through sudo (T1548.003) host=srv01 user=hector event_kind=sudo_command",
+    ];
+    assert_eq!(alerts.len(), expected_prefixes.len(), "alerts: {alerts:#?}");
+    for (alert, prefix) in alerts.iter().zip(expected_prefixes) {
+        assert!(alert.starts_with(prefix), "\nalert:  {alert}\nprefix: {prefix}");
+    }
+    assert!(alerts[2].contains("COMMAND=/bin/bash"), "{}", alerts[2]);
+    assert!(alerts[3].contains("COMMAND=/usr/bin/su -"), "{}", alerts[3]);
+    assert!(
+        stderr(&output).contains("lines=10 events=10 alerts=4"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
