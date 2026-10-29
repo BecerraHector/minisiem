@@ -20,7 +20,7 @@ Branch: `feat/storage-and-search` · Delivery: stacked PRs to main, one per task
 
 | ID | Specs | Route | Status | Evidence |
 |----|-------|-------|--------|----------|
-| T1 | S2, S3, S7, S10 | inline | pending | |
+| T1 | S2, S3, S7, S10 | inline | done (PR1) | `8ece4d6`. New module, no prior RED; 7 tests, mutation-checked (no batch auto-commit, no commit on drop, any schema accepted: each fails a test). 169 unit + 1 + 23 CLI. 484 changed lines without Cargo.lock: over the 400 budget, no cohesive split (serde derives exist for this module; tests stay with code) |
 | T2 | S4, S9 | inline | pending | |
 | T3 | S5, S8 | inline | pending | |
 | T4 | S6 | inline | pending | |
@@ -34,3 +34,5 @@ Routes are inline: one parent context, units are sequential (each builds on the 
 - **L2** (2026-10-29) Decisions asked one at a time: storage "SQLite (Recommended)", content "Eventos y alertas (Recommended)", activation "Opt-in con --db PATH (Recommended)", search "Subcomando con filtros (Recommended)", retention "--retain-days en watch (Recommended)". Base: `main` at `df5ccc5`.
 - **L3** Code map: `Pipeline::process` (src/pipeline.rs) runs detectors and emits through the `AlertSink` port (src/alerting/mod.rs); `Event` (src/event.rs) and `Alert`/`Evidence` (src/alert.rs) have no serde derives yet; `parse_timespan` exists privately in src/detection/sigma/correlation.rs.
 - **L4** (2026-10-29) User chose delivery: "PRs encadenados a main (Recommended)". Slices: PR1 = T1 (`feat/storage`), PR2 = T2, PR3 = T3, PR4 = T4; each branches from main after the previous merges; README docs go with each slice.
+- **L5** (2026-10-29) T1 committed `8ece4d6` on `feat/storage`; independent verifier launched with a 10-minute budget (the previous one hung for 30+ minutes).
+- **L6** (2026-10-29) Verifier (T1, 3 min): PASS, batch output byte-identical over 22 fixture runs. Advisories A1 (schema creation not atomic; a half-created schema makes the file unopenable) and A2 (failed COMMIT wedged the store) fixed in a second commit. RED: 4 threads opening one new file -> "database is locked" at `PRAGMA journal_mode = WAL` (SQLite returns BUSY at once on that lock collision); fixed with a retry loop plus BEGIN IMMEDIATE around version check and schema; mutation `BEGIN` instead of `BEGIN IMMEDIATE` fails the test. A2 has no runnable RED (WAL commits do not fail on readers). A3 (Drop ignores flush errors) goes to T2, which flushes explicitly.
