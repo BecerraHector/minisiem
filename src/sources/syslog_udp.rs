@@ -141,7 +141,7 @@ mod tests {
             )
             .unwrap();
 
-        let event = inlet.events.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let event = inlet.next(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(event.src_ip.to_string(), "203.0.113.7");
     }
 }

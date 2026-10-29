@@ -183,7 +183,7 @@ mod tests {
         let dropped = inlet.dropped_counter();
         let reader = thread::spawn(move || {
             thread::sleep(std::time::Duration::from_millis(100));
-            inlet.events.iter().count()
+            std::iter::from_fn(|| inlet.next(std::time::Duration::from_secs(5)).ok()).count()
         });
 
         forward_events(journal.as_slice(), &outlet).unwrap();

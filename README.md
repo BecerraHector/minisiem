@@ -159,10 +159,9 @@ Events wait for the detectors in a queue of 10,000. When a flood fills it, new U
 dropped instead of exhausting memory: the first drop prints a warning and the summary adds
 `dropped=N`. Dropping is itself a blind spot an attacker can cause on purpose, which is why it is
 never silent. journald events are not dropped: the journald source waits for room, `journalctl`
-waits with it, and journald keeps the entries meanwhile. The queue is shared, though: while journald
-has a backlog it takes almost every free slot, so with `--syslog-udp` too nearly all UDP events are
-dropped (and counted) until it catches up. Anyone who can make sshd log on the host can cause that
-on purpose; a fair share per source is tracked in #15. Ctrl+C skips the queue, so stopping never
+waits with it, and journald keeps the entries meanwhile. journald holds at most half the queue, so a
+journald backlog never takes the room UDP events need: with both sources flooding, each gets through,
+and UDP only drops once its own half is full. Ctrl+C skips the queue, so stopping never
 waits for a backlog; the events left in it are counted as `unprocessed=N` in the summary. Alerts are
 written as they are raised; if stdout stops draining (a pipe nobody reads), detection waits for it
 without losing alerts, and Ctrl+C still stops within 2 seconds: watch prints
