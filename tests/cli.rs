@@ -159,6 +159,37 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
 }
 
+#[test]
+fn watch_exits_with_101_when_detection_panics() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--syslog-udp", "127.0.0.1:0"])
+        .env("MINISIEM_TEST_PANIC", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = lines_of(child.stderr.take().unwrap());
+    let listening = next_line(&stderr);
+    let addr = listening
+        .strip_prefix("minisiem: listening for syslog on udp://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {listening}"))
+        .to_string();
+
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .send_to(
+            b"<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2",
+            &addr,
+        )
+        .unwrap();
+    let status = wait_at_most(&mut child, Duration::from_secs(10));
+
+    assert_eq!(status.map(|s| s.code()), Some(Some(101)), "a panic must not hang watch");
+    let reported = std::iter::from_fn(|| stderr.recv_timeout(Duration::from_secs(1)).ok())
+        .any(|line| line.contains("panicked") || line.contains("MINISIEM_TEST_PANIC is set"));
+    assert!(reported, "the panic message reaches stderr");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn watch_reports_the_datagrams_the_kernel_drops_under_a_flood() {

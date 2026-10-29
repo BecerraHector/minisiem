@@ -17,7 +17,7 @@ Items quoted from issue #8.
 - **S8** "**Test for that `Ok` path.** The unit test covers only the read error path of `stop_and_explain`; nothing checks the `Ok` path with journalctl still running."
 - **S9** "**Comment the `/proc` field in the fake.** `tests/fixtures/fake-journalctl/records-group.sh` reads field index 4 of `/proc/$$/stat` (pgrp, the 5th field) and relies on the process name having no spaces. Say so in a comment."
 - **S10** "**Quote triggers without a test** (from the review of #12): `field_value` in `src/alerting/console.rs` quotes values containing `=` or `\"`, but only values with spaces and `,` are tested. Add cases such as `x=src=9.9.9.9` and a value with `\"`."
-- **S11** "**End-to-end test for a detector panic in watch.** `watch` exits with 101 when the detection thread panics (`ReportPanic` in `src/main.rs`), but only the guard has a unit test; the exit code was checked by hand with an injected panic. A test-only way to trigger a panic would let a CLI test pin it." Decision pending (user): how the test-only trigger is exposed.
+- **S11** "**End-to-end test for a detector panic in watch.** `watch` exits with 101 when the detection thread panics (`ReportPanic` in `src/main.rs`), but only the guard has a unit test; the exit code was checked by hand with an injected panic. A test-only way to trigger a panic would let a CLI test pin it." Decision (L5): an environment variable.
 - **S12** "**CLI test robustness.** `watch_stops_on_interrupt_even_when_nobody_reads_its_alerts` assumes ~2000 UDP datagrams arrive and fill the stdout pipe within 500 ms. Consider waiting until the pipe is actually full, or sending more alerts, so small UDP buffers or large pipe buffers cannot make it flaky."
 
 ## Tasks
@@ -31,7 +31,7 @@ Items quoted from issue #8.
 | T5 | S6 | inline | done | `cb73cd5`. RED: `/usr/./sbin/sshd` accepted. Spelling must equal its own components |
 | T6 | S5 | inline | done | `534bed6`. Checked: `minisiem watch` runs the subcommand, `minisiem ./watch` reads the file |
 | T7 | S4 | inline | done | documented in the README (watch mode) and the constant's comment |
-| T8 | S11 | inline | blocked: decision | |
+| T8 | S11 | inline | done | `MINISIEM_TEST_PANIC` adds a detector that panics. RED: watch kept running (killed after 10 s). GREEN: exit 101 and the panic message on stderr, 3/3; 161 unit + 22 CLI |
 | T9 | S12 | inline | done | `d41073e`. Sends batches until a thread's wchan contains `pipe_w` (this kernel: `anon_pipe_write`); 0/10 failures; Linux-only |
 
 Routes are inline: no Writer trigger (units are small and sequential, one parent context).
@@ -42,3 +42,4 @@ Routes are inline: no Writer trigger (units are small and sequential, one parent
 - **L2** Base: `main` at `48379f7` (PR #18 merged). Not in scope unless the user asks: the two advisories from the #4 reviews offered for #8 (kernel_dropped over-count after the reader stops; tests depending on `net.core.rmem_default`), which got no answer.
 - **L3** (2026-10-28) T1-T6 and T9 done inline (commits above). Next: decisions for T7 (S4) and T8 (S11).
 - **L4** (2026-10-28) User chose for S4: "Documentarla (Recommended)" (no new attack surface: `journalctl` is already looked up in `PATH`).
+- **L5** (2026-10-28) User chose for S11: "Variable de entorno (Recommended)".
