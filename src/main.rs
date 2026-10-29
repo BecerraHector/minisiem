@@ -137,7 +137,10 @@ fn analyze(file: Option<&PathBuf>, detection: &DetectionArgs) -> Result<(), Stri
 
 /// Watch mode: run until interrupted or until a source fails.
 fn watch(args: &WatchArgs) -> Result<(), String> {
-    let detectors = args.detection.detectors()?;
+    let mut detectors = args.detection.detectors()?;
+    if std::env::var_os(TEST_PANIC_ENV).is_some() {
+        detectors.push(Box::new(PanicOnEvent));
+    }
     let (outlet, inlet) = sources::channel(QUEUE_CAPACITY);
 
     let mut kernel_drops = None;
@@ -145,7 +148,7 @@ fn watch(args: &WatchArgs) -> Result<(), String> {
         let udp = SyslogUdp::bind(addr, args.allow_remote_syslog)?;
         eprintln!("minisiem: listening for syslog on udp://{}", udp.local_addr());
         kernel_drops = udp.kernel_drops();
-        udp.spawn(parser(), outlet.clone());
+        udp.spawn(outlet.clone());
     }
     // Kept alive until watching ends: dropping it stops journalctl.
     let _journal = match args.journal {
@@ -274,6 +277,19 @@ impl Drop for ReportPanic {
 
 /// How long Ctrl+C waits for detection to stop before giving up on it.
 const STOP_GRACE: StdDuration = StdDuration::from_secs(2);
+
+/// Makes watch's detection panic on its first event, so tests can check
+/// how watch ends when a detector panics. Not for use outside tests.
+const TEST_PANIC_ENV: &str = "MINISIEM_TEST_PANIC";
+
+/// A detector that panics, enabled by [`TEST_PANIC_ENV`].
+struct PanicOnEvent;
+
+impl Detector for PanicOnEvent {
+    fn evaluate(&mut self, _event: &minisiem::event::Event) -> Vec<minisiem::alert::Alert> {
+        panic!("{TEST_PANIC_ENV} is set");
+    }
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

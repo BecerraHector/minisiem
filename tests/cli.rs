@@ -89,6 +89,22 @@ fn wait_at_most(child: &mut Child, limit: Duration) -> Option<std::process::Exit
     None
 }
 
+#[cfg(target_os = "linux")]
+/// True when one of the child's threads waits for room in a full pipe. The
+/// kernel names that wait `pipe_write`, `pipe_wait_writable` or
+/// `anon_pipe_write`, depending on its version; read-side waits
+/// (`pipe_wait_readable`, and `pipe_wait` before Linux 5.5) do not count.
+fn blocked_writing_to_a_pipe(child: &Child) -> bool {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", child.id())) else {
+        return false;
+    };
+    tasks.filter_map(Result::ok).any(|task| {
+        std::fs::read_to_string(task.path().join("wchan"))
+            .is_ok_and(|wchan| ["pipe_write", "pipe_wait_writable", "anon_pipe_write"].contains(&wchan.trim()))
+    })
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
@@ -106,19 +122,23 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
         .strip_prefix("minisiem: listening for syslog on udp://")
         .unwrap_or_else(|| panic!("unexpected startup line: {listening}"));
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    // One alert per source IP: far more output than a pipe buffer holds.
-    for i in 0..2000u32 {
-        let frame = format!(
-            "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 10.0.{}.{} port 1 ssh2",
-            i / 250,
-            i % 250 + 1
-        );
-        sender.send_to(frame.as_bytes(), addr).unwrap();
-        if i % 100 == 99 {
-            thread::sleep(Duration::from_millis(5));
+    // One alert per source IP, in batches, until writing an alert blocks:
+    // whatever the pipe's size or how many datagrams the kernel drops.
+    let mut ip = 0u32;
+    while !blocked_writing_to_a_pipe(&child) {
+        assert!(ip < 50_000, "stdout never filled up");
+        for _ in 0..100 {
+            let frame = format!(
+                "<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 10.{}.{}.{} port 1 ssh2",
+                ip / 62_500,
+                ip / 250 % 250,
+                ip % 250 + 1
+            );
+            sender.send_to(frame.as_bytes(), addr).unwrap();
+            ip += 1;
         }
+        thread::sleep(Duration::from_millis(20));
     }
-    thread::sleep(Duration::from_millis(500));
 
     interrupt(&child);
     let status = wait_at_most(&mut child, Duration::from_secs(10));
@@ -139,6 +159,37 @@ fn watch_stops_on_interrupt_even_when_nobody_reads_its_alerts() {
     );
     let summary = next_line(&stderr);
     assert!(summary.starts_with("minisiem: watch: events="), "{summary}");
+}
+
+#[test]
+fn watch_exits_with_101_when_detection_panics() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_minisiem"))
+        .args(["watch", "--syslog-udp", "127.0.0.1:0"])
+        .env("MINISIEM_TEST_PANIC", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = lines_of(child.stderr.take().unwrap());
+    let listening = next_line(&stderr);
+    let addr = listening
+        .strip_prefix("minisiem: listening for syslog on udp://")
+        .unwrap_or_else(|| panic!("unexpected startup line: {listening}"))
+        .to_string();
+
+    UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .send_to(
+            b"<38>Oct 22 10:15:00 srv01 sshd[1]: Failed password for root from 203.0.113.7 port 1 ssh2",
+            &addr,
+        )
+        .unwrap();
+    let status = wait_at_most(&mut child, Duration::from_secs(10));
+
+    assert_eq!(status.map(|s| s.code()), Some(Some(101)), "a panic must not hang watch");
+    let reported = std::iter::from_fn(|| stderr.recv_timeout(Duration::from_secs(1)).ok())
+        .any(|line| line.contains("panicked") || line.contains("MINISIEM_TEST_PANIC is set"));
+    assert!(reported, "the panic message reaches stderr");
 }
 
 #[cfg(target_os = "linux")]

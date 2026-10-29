@@ -1,6 +1,6 @@
 //! journald entries as printed by `journalctl -o json` (one JSON object per line).
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::DateTime;
 use serde_json::{Map, Value};
@@ -45,10 +45,12 @@ impl LogParser for JournalParser {
 
 /// True for an sshd binary under `/usr/`, e.g. `/usr/sbin/sshd` or
 /// `/usr/lib/openssh/sshd-session`. `..` is refused so a path cannot climb
-/// out of `/usr/`.
+/// out of `/usr/`, and so are spellings journald never records (`/./`, `//`,
+/// a trailing `/`).
 fn is_installed_sshd(executable: &str) -> bool {
     let path = Path::new(executable);
     path.starts_with("/usr")
+        && path.components().collect::<PathBuf>().as_os_str() == executable
         && path
             .components()
             .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
@@ -183,6 +185,21 @@ mod tests {
         for line in spoofed {
             assert_eq!(JournalParser.parse(&line), None, "should be rejected: {line}");
         }
+    }
+
+    #[test]
+    fn accepts_only_the_plain_spelling_of_an_sshd_path() {
+        // journald records the resolved path: other spellings never come
+        // from it.
+        for exe in [
+            "/usr/./sbin/sshd",
+            "/usr//sbin/sshd",
+            "/usr/sbin/sshd/",
+            "/usr/sbin/./sshd",
+        ] {
+            assert!(!is_installed_sshd(exe), "should be rejected: {exe}");
+        }
+        assert!(is_installed_sshd("/usr/sbin/sshd"));
     }
 
     #[test]

@@ -138,6 +138,15 @@ the same detection options as batch mode and at least one source:
 | `--journal` | Runs `journalctl --follow --output=json --lines=0` for the `sshd`, `sshd-session` and `sshd-auth` processes. Needs permission to read the system journal (root or the `systemd-journal` group). |
 | `--syslog-udp <ADDR>` | Receives syslog datagrams on `ADDR`, e.g. `127.0.0.1:5514`. One datagram is one message, up to 8 KiB. |
 
+`--journal` runs the `journalctl` found in `PATH`, or the program named by the
+`MINISIEM_JOURNALCTL` environment variable, which the tests use to stand in for it. Like `PATH`,
+it decides which program minisiem trusts for journald events, so keep it out of reach of other
+users. `MINISIEM_TEST_PANIC`, for tests only, makes detection panic on the first event (watch then
+exits with code 101).
+
+`watch` is always the subcommand: to analyze a file named `watch`, give it a path, as in
+`minisiem ./watch`.
+
 To follow a log file, let `tail` handle rotation and pipe it into batch mode:
 
 ```sh

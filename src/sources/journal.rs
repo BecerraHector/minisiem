@@ -14,7 +14,8 @@ use crate::ingestion::{JournalParser, LogParser, SSHD_PROCESSES};
 /// Name used in messages about this source.
 const SOURCE: &str = "journald";
 
-/// Overrides the `journalctl` binary (used by tests).
+/// Overrides the `journalctl` binary, which is otherwise looked up in `PATH`
+/// (used by tests; documented in the README).
 pub const JOURNALCTL_ENV: &str = "MINISIEM_JOURNALCTL";
 
 /// A running `journalctl`; dropping it stops the process.
@@ -67,7 +68,7 @@ impl JournalFollow {
 
 /// Stops `journalctl` once reading its output ended: kills it if it still
 /// runs, waits for its stderr relay, reaps it, and explains why it stopped.
-fn stop_and_explain(result: io::Result<()>, child: &Mutex<Child>, relay: JoinHandle<()>) -> String {
+fn stop_and_explain(result: io::Result<Ended>, child: &Mutex<Child>, relay: JoinHandle<()>) -> String {
     // Usually journalctl is already gone (stdout closed). After a read error,
     // or once the pipeline is gone, it may still run, and the relay would
     // wait for its stderr forever: stop it first. Killing an exited process
@@ -81,8 +82,10 @@ fn stop_and_explain(result: io::Result<()>, child: &Mutex<Child>, relay: JoinHan
     let status = child.lock().ok().and_then(|mut child| child.wait().ok());
     match (result, status) {
         (Err(e), _) => format!("reading journalctl output failed: {e}"),
-        (Ok(()), Some(status)) => format!("journalctl exited ({status})"),
-        (Ok(()), None) => "journalctl exited".into(),
+        // Killed above: its status would read as if it had crashed.
+        (Ok(Ended::PipelineGone), _) => "journalctl stopped by minisiem: detection no longer reads events".into(),
+        (Ok(_), Some(status)) => format!("journalctl exited ({status})"),
+        (Ok(_), None) => "journalctl exited".into(),
     }
 }
 
@@ -102,20 +105,29 @@ fn journalctl_command(program: OsString) -> Command {
     command
 }
 
+/// Why reading journalctl's output ended without an error.
+#[derive(Debug, PartialEq, Eq)]
+enum Ended {
+    /// journalctl closed its output: it exited, or is exiting.
+    Output,
+    /// Nobody takes events any more; journalctl is still running.
+    PipelineGone,
+}
+
 /// Sends every sshd event found in `reader` until it ends. Waits when the
 /// queue is full: journalctl then waits too, and journald keeps the entries.
-fn forward_events(mut reader: impl BufRead, outlet: &Outlet) -> io::Result<()> {
+fn forward_events(mut reader: impl BufRead, outlet: &Outlet) -> io::Result<Ended> {
     let mut buf = Vec::new();
     while reader.read_until(b'\n', &mut buf)? > 0 {
         let line = String::from_utf8_lossy(&buf);
         if let Some(event) = JournalParser.parse(line.trim_end())
             && !outlet.wait_and_send(event)
         {
-            return Ok(());
+            return Ok(Ended::PipelineGone);
         }
         buf.clear();
     }
-    Ok(())
+    Ok(Ended::Output)
 }
 
 /// `journalctl` does not fail without permission to read the system journal:
@@ -165,7 +177,7 @@ mod tests {
         let journal = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json")).unwrap();
         let (outlet, inlet) = super::super::channel(100);
 
-        forward_events(journal.as_slice(), &outlet).unwrap();
+        assert_eq!(forward_events(journal.as_slice(), &outlet).unwrap(), Ended::Output);
         drop(outlet);
 
         assert_eq!(
@@ -197,7 +209,19 @@ mod tests {
     fn reports_a_read_error_while_journalctl_is_still_running() {
         // The relay ends only when stderr closes, which a live journalctl
         // never does on its own.
-        let mut child = Command::new("sleep").arg("600").stderr(Stdio::piped()).spawn().unwrap();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("600");
+
+        assert_eq!(
+            explain_stop(sleep, Err(io::Error::other("boom"))),
+            "reading journalctl output failed: boom"
+        );
+    }
+
+    /// Runs `stop_and_explain` on a stand-in for journalctl, with a stderr
+    /// relay like the real one, and never leaves the stand-in running.
+    fn explain_stop(mut command: Command, result: io::Result<Ended>) -> String {
+        let mut child = command.stderr(Stdio::piped()).spawn().unwrap();
         let stderr = child.stderr.take().unwrap();
         let relay = thread::spawn(move || for _ in BufReader::new(stderr).lines() {});
         let child = Arc::new(Mutex::new(child));
@@ -205,17 +229,33 @@ mod tests {
         let (done, reported) = std::sync::mpsc::channel();
         let running = Arc::clone(&child);
         thread::spawn(move || {
-            let reason = stop_and_explain(Err(io::Error::other("boom")), &running, relay);
-            let _ = done.send(reason);
+            let _ = done.send(stop_and_explain(result, &running, relay));
         });
         let reason = reported.recv_timeout(std::time::Duration::from_secs(5));
-
-        // Never leave the stand-in running, whatever the outcome.
         let _ = child.lock().map(|mut child| child.kill());
+        reason.expect("stop_and_explain must not wait for journalctl forever")
+    }
+
+    #[test]
+    fn stops_reading_once_the_pipeline_is_gone() {
+        let journal = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/journal.json")).unwrap();
+        let (outlet, inlet) = super::super::channel(100);
+        drop(inlet);
+
         assert_eq!(
-            reason.as_deref(),
-            Ok("reading journalctl output failed: boom"),
-            "the failure must be reported, not wait for journalctl forever"
+            forward_events(journal.as_slice(), &outlet).unwrap(),
+            Ended::PipelineGone
+        );
+    }
+
+    #[test]
+    fn says_minisiem_stopped_journalctl_once_the_pipeline_is_gone() {
+        let mut sleep = Command::new("sleep");
+        sleep.arg("600");
+
+        assert_eq!(
+            explain_stop(sleep, Ok(Ended::PipelineGone)),
+            "journalctl stopped by minisiem: detection no longer reads events"
         );
     }
 
