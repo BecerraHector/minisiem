@@ -261,6 +261,29 @@ minisiem search --db minisiem.db events --ip 203.0.113.7 --since 1d
 minisiem search --db minisiem.db alerts --since 2026-10-22 --until 2026-10-23
 ```
 
+## sudo
+
+sudo entries are read from the same inputs as sshd's: syslog files (`/var/log/auth.log`,
+`/var/log/secure`), network syslog, and journald (`watch --journal` follows `sudo` too). They become
+`sudo_command`, `sudo_denied` and `sudo_failed_password` events with the `target_user` and `command`
+fields (see [Fields](#fields)), and have no source IP. The rules in [`rules/sudo/`](rules/sudo/)
+detect privilege escalation attempts (MITRE ATT&CK
+[T1548.003](https://attack.mitre.org/techniques/T1548/003/)):
+
+| Rule | Level | Fires on |
+|------|-------|----------|
+| sudo by a user not in sudoers | high | `user NOT in sudoers` |
+| Shell as root through sudo | medium | `sudo -i`, `sudo -s`, `sudo bash`, `sudo su -`: a root shell, whose commands sudo no longer logs |
+| sudo password guessing | medium | 3 summaries of wrong passwords from one user within 10 minutes (each sums up to 3 attempts) |
+
+```sh
+cargo run -- --rules rules /var/log/auth.log
+minisiem search --db minisiem.db events --kind sudo_denied --since 1d
+```
+
+Rules match the end of `command` (`endswith`), because a crafted working directory can add fake
+text before it but never after (see [Trust model](#trust-model)).
+
 ## Architecture
 
 ```

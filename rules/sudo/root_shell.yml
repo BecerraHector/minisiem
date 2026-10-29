@@ -1,0 +1,34 @@
+title: Shell as root through sudo
+id: 8d2e3f4a-5b6c-4d7e-9f8a-0b1c2d3e4f5a
+status: experimental
+description: |
+  sudo started an interactive shell as root (sudo -i, sudo -s, sudo bash,
+  sudo su): from there, commands no longer go through sudo's log. The
+  command is read so that the one that ran always ends it, which is why
+  the rule matches its end.
+author: minisiem
+date: 2026-10-29
+tags:
+  - attack.privilege_escalation
+  - attack.t1548.003
+logsource:
+  product: linux
+  service: sudo
+detection:
+  selection:
+    event_kind: sudo_command
+    target_user: root
+    command|endswith:
+      - /bash
+      - /sh
+      - /zsh
+      - /dash
+      - /ksh
+      - /fish
+      - /su
+      - /su -
+      - /su -l
+  condition: selection
+falsepositives:
+  - Administrators who work in a root shell on purpose
+level: medium
