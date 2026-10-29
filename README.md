@@ -138,6 +138,9 @@ the same detection options as batch mode and at least one source:
 | `--journal` | Runs `journalctl --follow --output=json --lines=0` for the `sshd`, `sshd-session` and `sshd-auth` processes. Needs permission to read the system journal (root or the `systemd-journal` group). |
 | `--syslog-udp <ADDR>` | Receives syslog datagrams on `ADDR`, e.g. `127.0.0.1:5514`. One datagram is one message, up to 8 KiB. |
 
+`watch` is always the subcommand: to analyze a file named `watch`, give it a path, as in
+`minisiem ./watch`.
+
 To follow a log file, let `tail` handle rotation and pipe it into batch mode:
 
 ```sh
